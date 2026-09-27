@@ -1,0 +1,497 @@
+{
+  "custom-layouts": [
+    {
+      "uuid": "{B10B8E72-07D2-4BA0-A61B-03A20576C626}",
+      "name": "Left7",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 2,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          6769,
+          3231
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 0,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{27D9B840-3B46-437E-BD86-F789FF26FDCE}",
+      "name": "Righ8",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 2,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          2266,
+          7734
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{BA230705-EF80-4462-9027-6586CF80ACBD}",
+      "name": "ZoomTop",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 1,
+        "rows-percentage": [
+          3810,
+          6190
+        ],
+        "columns-percentage": [
+          10000
+        ],
+        "cell-child-map": [
+          [
+            0
+          ],
+          [
+            1
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{72761859-2285-4092-95B5-B7F09FD17EAF}",
+      "name": "Half-Split",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 2,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          4999,
+          5001
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{81FD49DD-D72C-4095-B66D-57F9E9F59118}",
+      "name": "Left6",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 2,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          6666,
+          3334
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{B7815471-37C6-499B-821F-89F739F6032C}",
+      "name": "Left4",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 2,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          3156,
+          6844
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{28711DC5-81AD-4786-AEB5-7473AF064078}",
+      "name": "2:4:4",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 3,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          1978,
+          3990,
+          4032
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1,
+            2
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{0CFF0719-E226-42FD-AA51-51B2168687C7}",
+      "name": "1:5:4",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 3,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          1234,
+          5432,
+          3334
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1,
+            2
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 16,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{3F4D54DC-CD08-4C1C-BBCE-C0C14AD17430}",
+      "name": "3-Terms Left",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 3,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          5208,
+          2395,
+          2397
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1,
+            2
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 0,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{73474CA9-91C6-4E8E-AC3A-6CD4BEF34751}",
+      "name": "3-Terms right",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 3,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          2641,
+          2628,
+          4731
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1,
+            2
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{A0C4CA63-A172-4E27-872B-5D5968EE8A8A}",
+      "name": "5 Terminals",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 3,
+        "rows-percentage": [
+          4971,
+          5029
+        ],
+        "columns-percentage": [
+          2641,
+          2628,
+          4731
+        ],
+        "cell-child-map": [
+          [
+            0,
+            2,
+            4
+          ],
+          [
+            1,
+            3,
+            4
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{776E47DB-2F4D-4DE6-912E-154499AE77AD}",
+      "name": "6 Terminals",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 3,
+        "rows-percentage": [
+          4971,
+          5029
+        ],
+        "columns-percentage": [
+          2641,
+          2628,
+          4731
+        ],
+        "cell-child-map": [
+          [
+            0,
+            2,
+            4
+          ],
+          [
+            1,
+            3,
+            5
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{60390989-B7CB-4762-B156-AADD2E5A10CD}",
+      "name": "4-Terms",
+      "type": "grid",
+      "info": {
+        "rows": 1,
+        "columns": 4,
+        "rows-percentage": [
+          10000
+        ],
+        "columns-percentage": [
+          2506,
+          2497,
+          2491,
+          2506
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1,
+            2,
+            3
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{3EFCE2F7-0AA5-40D0-978B-A1AB24E6D21E}",
+      "name": "8-Terms",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 4,
+        "rows-percentage": [
+          4990,
+          5010
+        ],
+        "columns-percentage": [
+          2506,
+          2497,
+          2491,
+          2506
+        ],
+        "cell-child-map": [
+          [
+            0,
+            2,
+            4,
+            6
+          ],
+          [
+            1,
+            3,
+            5,
+            7
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{486A4F9C-1656-42A1-A585-0C233414670F}",
+      "name": "7-Terms",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 4,
+        "rows-percentage": [
+          4990,
+          5010
+        ],
+        "columns-percentage": [
+          2506,
+          2497,
+          2491,
+          2506
+        ],
+        "cell-child-map": [
+          [
+            0,
+            1,
+            3,
+            5
+          ],
+          [
+            0,
+            2,
+            4,
+            6
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{0C63509C-F2AF-432D-A66E-82099ECB26BE}",
+      "name": "6 Terminals (1)",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 3,
+        "rows-percentage": [
+          4971,
+          5029
+        ],
+        "columns-percentage": [
+          4729,
+          2629,
+          2642
+        ],
+        "cell-child-map": [
+          [
+            0,
+            2,
+            4
+          ],
+          [
+            1,
+            3,
+            5
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    },
+    {
+      "uuid": "{22F0DA86-FCF7-497C-A66A-74B1D44A3B61}",
+      "name": "6 Terminals (2)",
+      "type": "grid",
+      "info": {
+        "rows": 2,
+        "columns": 3,
+        "rows-percentage": [
+          4971,
+          5029
+        ],
+        "columns-percentage": [
+          4729,
+          2629,
+          2642
+        ],
+        "cell-child-map": [
+          [
+            0,
+            2,
+            4
+          ],
+          [
+            1,
+            3,
+            5
+          ]
+        ],
+        "show-spacing": true,
+        "spacing": 5,
+        "sensitivity-radius": 20
+      }
+    }
+  ]
+}

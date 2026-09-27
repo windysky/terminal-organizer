@@ -1,0 +1,45 @@
+{
+  "comment": "B5 pinned window inventory (night-design-2026-09-25 unit B5, tests 1-5). Deterministic fake acquisition: the tools load this file instead of enumerating the live desktop. Window rows: 4101 monitor 1 current, 4102 monitor 2 current, 4103 monitor 1 other-desktop, 4104 monitor 1 unknown-desktop, 4105 unattributed.",
+  "failAcquisition": false,
+  "monitors": [
+    {
+      "interfacePath": "\\\\?\\DISPLAY#DELA0B5#5&b5a&0&UID001#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}",
+      "monitorId": "DELA0B5",
+      "instance": "5&b5a&0&UID001",
+      "serial": "B5SER001",
+      "number": 1,
+      "left": 0,
+      "top": 0,
+      "width": 1920,
+      "height": 1200,
+      "workLeft": 0,
+      "workTop": 0,
+      "workWidth": 1920,
+      "workHeight": 1152,
+      "dpi": 96
+    },
+    {
+      "interfacePath": "\\\\?\\DISPLAY#DELA0B5#5&b5b&0&UID002#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}",
+      "monitorId": "DELA0B5",
+      "instance": "5&b5b&0&UID002",
+      "serial": "B5SER002",
+      "number": 2,
+      "left": 1920,
+      "top": 0,
+      "width": 1920,
+      "height": 1200,
+      "workLeft": 1920,
+      "workTop": 0,
+      "workWidth": 1920,
+      "workHeight": 1152,
+      "dpi": 96
+    }
+  ],
+  "windows": [
+    { "handle": 4101, "monitor": 1, "desktop": "current" },
+    { "handle": 4102, "monitor": 2, "desktop": "current" },
+    { "handle": 4103, "monitor": 1, "desktop": "other" },
+    { "handle": 4104, "monitor": 1, "desktop": "unknown" },
+    { "handle": 4105, "monitor": null, "desktop": "current" }
+  ]
+}
