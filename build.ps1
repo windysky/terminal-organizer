@@ -7,6 +7,8 @@ $fw = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
 $csc = Join-Path $fw 'csc.exe'
 $binDir = Join-Path $root 'bin'
 $out = Join-Path $binDir 'TerminalOrganizer.Core.dll'
+# The single product version (src\AssemblyVersion.cs) is compiled into all three targets.
+$versionSource = Join-Path $root 'src\AssemblyVersion.cs'
 
 if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir | Out-Null }
 
@@ -30,7 +32,7 @@ $cscArgs = @(
     "/r:$fw\System.Management.dll",
     "/r:$fw\WPF\UIAutomationClient.dll",
     "/r:$fw\WPF\UIAutomationTypes.dll"
-) + $sources
+) + $sources + @($versionSource)
 
 Write-Output ('csc ' + ($cscArgs -join ' '))
 & $csc @cscArgs
@@ -64,7 +66,7 @@ $appArgs = @(
     "/r:$fw\System.Windows.Forms.dll",
     "/r:$fw\System.Drawing.dll",
     "/r:$out"
-) + $appSources
+) + $appSources + @($versionSource)
 
 Write-Output ('csc ' + ($appArgs -join ' '))
 & $csc @appArgs
@@ -93,7 +95,7 @@ $probeArgs = @(
     "/r:$fw\WPF\UIAutomationClient.dll",
     "/r:$fw\WPF\UIAutomationTypes.dll",
     "/r:$out"
-) + $probeSources
+) + $probeSources + @($versionSource)
 
 Write-Output ('csc ' + ($probeArgs -join ' '))
 & $csc @probeArgs

@@ -30,7 +30,10 @@ namespace TerminalOrganizer.App
         LastResult,
         OpenLog,
         Settings,
-        Exit
+        Exit,
+
+        /// <summary>Informational disabled product-version row (not flipped by the busy banner).</summary>
+        Version
     }
 
     /// <summary>
@@ -254,6 +257,7 @@ namespace TerminalOrganizer.App
                 false, false, null, null, lastResult, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.OpenLog, "Open log", true, false, null, null, null, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Settings, "Settings…", false, false, null, null, null, null));
+            entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Version, AppVersion.DisplayName, false, false, null, null, null, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Exit, "Exit", true, false, null, null, null, null));
             return entries.ToArray();
         }

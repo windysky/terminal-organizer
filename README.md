@@ -22,7 +22,7 @@ The first run shows a small welcome dialog explaining the hotkey and the tray-ov
 
 **SmartScreen:** the executable is unsigned, so the first run may show "Windows protected your PC". Click **More info** → **Run anyway**.
 
-**Start with Windows (optional):** press `Win+R`, type `shell:startup`, press Enter, and copy a shortcut of `TerminalOrganizer.App.exe` into the folder that opens. (An in-app toggle comes later.)
+**Start with Windows (optional):** check **Start TerminalOrganizer with Windows** in the first-run dialog. If the app is already set up, press `Win+R`, type `shell:startup`, press Enter, and put a shortcut to `TerminalOrganizer.App.exe` in that folder. If you move the app folder later, update the shortcut's target. Windows Task Manager → **Startup apps** should show the shortcut enabled.
 
 **Uninstall:** exit the app from the tray menu, then delete the folder. Settings are stored in `%LOCALAPPDATA%\TerminalOrganizer\settings.json` — delete that too for a fully clean removal.
 

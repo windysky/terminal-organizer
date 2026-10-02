@@ -1,8 +1,10 @@
 using System;
+using System.Drawing;
 using System.Globalization;
 using System.Threading;
 using System.Windows.Forms;
 using TerminalOrganizer.Core.Assignment;
+using TerminalOrganizer.Core.Monitors;
 using TerminalOrganizer.Core.Overflow;
 
 namespace TerminalOrganizer.App
@@ -106,6 +108,22 @@ namespace TerminalOrganizer.App
             return new OverflowChoiceDialogModel(summary, options, "Remember this choice", "Cancel");
         }
 
+        /// <summary>
+        /// Where the dialog opens (pure): centered on the monitor being organized, clamped
+        /// to its top-left so an oversized dialog never starts off that monitor. Null when
+        /// the monitor or its size is unknown — the dialog then falls back to CenterScreen.
+        /// </summary>
+        public static Point? DialogLocation(MonitorInfo monitor, int width, int height)
+        {
+            if (monitor == null || monitor.MonitorWidth <= 0 || monitor.MonitorHeight <= 0)
+            {
+                return null;
+            }
+            int x = monitor.MonitorLeft + Math.Max(0, (monitor.MonitorWidth - width) / 2);
+            int y = monitor.MonitorTop + Math.Max(0, (monitor.MonitorHeight - height) / 2);
+            return new Point(x, y);
+        }
+
         private static int CountStacked(AssignmentPlan plan)
         {
             int stacked = 0;
@@ -156,6 +174,18 @@ namespace TerminalOrganizer.App
                 dialog.MaximizeBox = false;
                 dialog.Width = 460;
                 dialog.Height = 120 + model.Options.Length * 40;
+                // Open on the organized monitor and on top: a tray app cannot take the
+                // foreground, so an unpinned dialog opens behind the terminals and the
+                // run waits on it unseen (live bug 2026-10-02).
+                Point? location = OverflowChoiceModel.DialogLocation(
+                    prepared == null ? null : prepared.Monitor, dialog.Width, dialog.Height);
+                if (location.HasValue)
+                {
+                    dialog.StartPosition = FormStartPosition.Manual;
+                    dialog.Location = location.Value;
+                }
+                dialog.TopMost = true;
+                dialog.Shown += delegate { dialog.Activate(); };
                 summary.Left = 12;
                 summary.Top = 12;
                 summary.Width = 424;

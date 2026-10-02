@@ -1540,7 +1540,7 @@ Describe 'B2 Physical-monitor menu and canonical manager UX' {
         $none = [TerminalOrganizer.Core.Assignment.ManagerSelector]::None()
         $entries = [TerminalOrganizer.App.TrayMenuBuilder]::Build((New-B2State $monitors $windows $none))
         ($entries | ForEach-Object { $_.Kind.ToString() }) -join ',' |
-            Should BeExactly 'Status,Separator,OrganizeUnderCursor,Separator,OrganizeMonitorRoot,Separator,ManagerRoot,Separator,OverflowRoot,Separator,LabelsAndPrioritiesRoot,Separator,LastResult,OpenLog,Settings,Exit'
+            Should BeExactly 'Status,Separator,OrganizeUnderCursor,Separator,OrganizeMonitorRoot,Separator,ManagerRoot,Separator,OverflowRoot,Separator,LabelsAndPrioritiesRoot,Separator,LastResult,OpenLog,Settings,Version,Exit'
         $entries[0].Label | Should BeExactly ('TerminalOrganizer ' + $script:B2Em + ' Ready')
         $entries[0].Enabled | Should Be $false
         $entries[2].Label | Should BeExactly 'Organize monitor under cursor    Ctrl+Alt+O'
@@ -1548,6 +1548,32 @@ Describe 'B2 Physical-monitor menu and canonical manager UX' {
         $busyEntries = [TerminalOrganizer.App.TrayMenuBuilder]::Build((New-B2State $monitors $windows $none -Busy $true))
         $busyEntries[0].Label | Should BeExactly ('Organizing' + $script:B2Ellipsis)
         $busyEntries[2].Enabled | Should Be $false
+    }
+
+    It 'Version row sits above Exit, disabled, and survives the busy banner' {
+        $source = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\AssemblyVersion.cs'))
+        $expected = [regex]::Match($source, 'AssemblyInformationalVersion\("([^"]+)"\)').Groups[1].Value
+        $monitors = @((New-B2Monitor 1 $true 0 0))
+        $none = [TerminalOrganizer.Core.Assignment.ManagerSelector]::None()
+        foreach ($busy in @($false, $true)) {
+            $entries = [TerminalOrganizer.App.TrayMenuBuilder]::Build((New-B2State $monitors @() $none -Busy $busy))
+            $row = $entries[$entries.Length - 2]
+            $row.Kind.ToString() | Should BeExactly 'Version'
+            $row.Label | Should BeExactly ('TerminalOrganizer v' + $expected)
+            $row.Enabled | Should Be $false
+        }
+    }
+
+    It 'Version: App, Core and UiaProbe all carry the src\AssemblyVersion.cs version' {
+        $source = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\AssemblyVersion.cs'))
+        $expected = [regex]::Match($source, 'AssemblyInformationalVersion\("([^"]+)"\)').Groups[1].Value
+        $expected | Should Match '^\d+\.\d+\.\d+$'
+        [TerminalOrganizer.App.AppVersion]::Text | Should BeExactly $expected
+        foreach ($name in @('TerminalOrganizer.App.exe', 'TerminalOrganizer.Core.dll', 'TerminalOrganizer.UiaProbe.exe')) {
+            $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $repoRoot ('bin\' + $name)))
+            $info.FileVersion | Should BeExactly ($expected + '.0')
+            $info.ProductVersion | Should BeExactly $expected
+        }
     }
 
     It 'B2 current manager is checked and exposes Show Clear' {
@@ -2523,6 +2549,24 @@ Describe 'C3 Overflow policy and pre-mutation choice' {
         $merge.Visible | Should Be $true
         $merge.Enabled | Should Be $false
         $merge.Checked | Should Be $false
+    }
+
+    It 'C3 dialog centers on the organized monitor, not the primary screen' {
+        # Live bug 2026-10-02: hotkey on the right monitor, dialog opened centered on the
+        # primary (left) screen behind other windows; the run waited on it unseen.
+        $location = [TerminalOrganizer.App.OverflowChoiceModel]::DialogLocation((New-TMonitor 2), 460, 240)
+        $location.X | Should Be 2650
+        $location.Y | Should Be 456
+    }
+
+    It 'C3 dialog location clamps an oversized dialog to the monitor origin' {
+        $location = [TerminalOrganizer.App.OverflowChoiceModel]::DialogLocation((New-TMonitor 2), 4000, 2000)
+        $location.X | Should Be 1920
+        $location.Y | Should Be 0
+    }
+
+    It 'C3 dialog location without a monitor falls back to screen centering' {
+        [TerminalOrganizer.App.OverflowChoiceModel]::DialogLocation($null, 460, 240) | Should BeNullOrEmpty
     }
 
     It 'C3 remember choice persists Stack or Redistribute' {

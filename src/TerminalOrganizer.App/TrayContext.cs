@@ -672,7 +672,7 @@ namespace TerminalOrganizer.App
             this.menu = BuildMenu();
             this.icon = new NotifyIcon();
             this.icon.Icon = this.applicationIcon;
-            this.icon.Text = "TerminalOrganizer";
+            this.icon.Text = AppVersion.DisplayName;
             this.icon.ContextMenuStrip = this.menu;
             this.icon.Visible = true;
             RegisterConfiguredHotkey(current);
