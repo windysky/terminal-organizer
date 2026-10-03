@@ -151,6 +151,18 @@ Nothing is moved. Cancellation performs zero mutations.
 **Where are my settings stored?**
 In `%LOCALAPPDATA%\TerminalOrganizer\settings.json`.
 
+## Known limitations
+
+- **Windows Terminal only.** Other terminals and other applications are not touched.
+- **FancyZones is required and is the only layout source.** There is no layout editor; the app reads the layouts you applied in FancyZones (per monitor, per virtual desktop) at every run.
+- **Verified at 100% display scaling only.** Canvas layouts follow FancyZones' DPI rules, but 125%/150% scaling has not been checked on a real screen yet. If a window lands a few pixels off on a scaled monitor, please open an issue with your scaling factor.
+- **The executable is unsigned**, so SmartScreen warns on first run. Compare the download against the SHA-256 checksums attached to each release if you want to verify it.
+- **One monitor per run.** The hotkey organizes the monitor under the cursor; the tray menu organizes the monitor you pick. Windows only move to other monitors through the overflow dialog's redistribute option.
+- **Hotkey-driven, not automatic.** New terminal windows are not placed until you organize again.
+- **Maximized or minimized windows are restored first; full-screen windows are skipped.**
+- **Session merge is a supervised command-line drill**, not a menu action, and stays off unless you run it yourself.
+- **Single instance.** A second copy exits immediately; the running one keeps the hotkey.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Junguk Hur.
