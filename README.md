@@ -6,6 +6,10 @@ A Windows tray app that organizes your Windows Terminal windows into the FancyZo
 
 Press `Ctrl+Alt+O`, and every Windows Terminal window on the monitor under your mouse cursor snaps into that monitor's FancyZones layout. That's the whole idea: you keep drawing layouts in FancyZones as usual, and TerminalOrganizer does the arranging.
 
+![Six scattered Windows Terminal windows before, and the same windows snapped into an eight-zone FancyZones layout after pressing Ctrl+Alt+O](docs/organize-before-after.png)
+
+*Terminal contents are blurred in this screenshot.*
+
 ## Requirements
 
 - **Windows 10 or 11** — the app uses .NET Framework 4.8, which is preinstalled on both. Nothing extra to install.

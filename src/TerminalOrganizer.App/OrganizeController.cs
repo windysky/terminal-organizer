@@ -267,7 +267,9 @@ namespace TerminalOrganizer.App
     /// joins by handle, classifies through the local assignment plans, resolves
     /// priorities through C1 — no enumeration, clock or Win32 call). The tools'
     /// -WhatIf previews and the C3 Prepare flow both build their snapshot here so the
-    /// classification rules can never drift per caller.
+    /// classification rules can never drift per caller. Redistribution sources are only
+    /// the organized monitor's own overflow (other monitors stay destinations and
+    /// occupancy only); a null organized key keeps the legacy every-monitor scope.
     /// </summary>
     public static class CrossMonitorSnapshotComposer
     {
@@ -283,6 +285,22 @@ namespace TerminalOrganizer.App
             WindowFact[] facts,
             WindowSnapshot[] snapshots,
             PriorityOverride[] manualOverrides)
+        {
+            return Compose(currentDesktopId, monitors, zonesPerMonitor, labelsPerMonitor, localPlans,
+                allWindows, facts, snapshots, manualOverrides, null);
+        }
+
+        public static CrossMonitorSnapshot Compose(
+            string currentDesktopId,
+            MonitorInfo[] monitors,
+            Zone[][] zonesPerMonitor,
+            string[] labelsPerMonitor,
+            AssignmentPlan[] localPlans,
+            EnumeratedWindow[] allWindows,
+            WindowFact[] facts,
+            WindowSnapshot[] snapshots,
+            PriorityOverride[] manualOverrides,
+            MonitorKey organizedMonitorKey)
         {
             int monitorCount = MonitorRowCount(monitors, zonesPerMonitor, labelsPerMonitor, localPlans);
             List<MonitorLayoutSnapshot> layouts = new List<MonitorLayoutSnapshot>();
@@ -324,7 +342,8 @@ namespace TerminalOrganizer.App
                     continue;
                 }
                 WindowSnapshot snapshot = FindSnapshot(snapshots, row.Handle);
-                windows.Add(BuildWindow(row, z, fact, snapshot, layouts[index], plans[index], manualOverrides));
+                windows.Add(BuildWindow(row, z, fact, snapshot, layouts[index], plans[index], manualOverrides,
+                    organizedMonitorKey));
             }
             return new CrossMonitorSnapshot(currentDesktopId, layouts.ToArray(), windows.ToArray());
         }
@@ -346,7 +365,7 @@ namespace TerminalOrganizer.App
 
         private static CrossMonitorWindow BuildWindow(EnumeratedWindow row, int zOrderIndex,
             WindowFact fact, WindowSnapshot snapshot, MonitorLayoutSnapshot layout,
-            AssignmentPlan plan, PriorityOverride[] manualOverrides)
+            AssignmentPlan plan, PriorityOverride[] manualOverrides, MonitorKey organizedMonitorKey)
         {
             PlannedMove move = null;
             bool hasMove = plan != null && plan.TryFindMove(fact.Id, out move);
@@ -356,7 +375,10 @@ namespace TerminalOrganizer.App
             // stacked assignment is the overflow the planner considers.
             bool stable = hasMove && move != null
                 && move.SkipReason == PlannedMoveSkipReason.None && !move.MoveRequired && !move.Stacked;
-            bool overflow = hasMove && move != null && move.Stacked;
+            // Only the organized monitor's own overflow is a redistribution source.
+            bool overflow = hasMove && move != null && move.Stacked
+                && (organizedMonitorKey == null || string.Equals(layout.MonitorKey.CanonicalValue,
+                    organizedMonitorKey.CanonicalValue, StringComparison.Ordinal));
             int currentZoneId = hasMove && move != null ? move.ZoneId : -1;
             bool verified = row.DesktopStatus != null && row.DesktopStatus.Success && row.DesktopStatus.Value;
 
@@ -1103,7 +1125,7 @@ namespace TerminalOrganizer.App
                 }
                 CrossMonitorSnapshot composed = CrossMonitorSnapshotComposer.Compose(desktop, rowMonitors,
                     rowZones, rowLabels, rowPlans, allWindows.ToArray(), allFacts.ToArray(),
-                    allSnapshots.ToArray(), overrides);
+                    allSnapshots.ToArray(), overrides, monitor.StableKey);
                 redistribution = CrossMonitorPlanner.Plan(composed);
             }
 

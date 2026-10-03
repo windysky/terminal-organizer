@@ -368,7 +368,8 @@ if ($WhatIf) {
     if ($cmMonitors.Count -gt 0) {
         $cmSnapshot = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose(
             $cmDesktop, $cmMonitors.ToArray(), $cmZones.ToArray(), $cmLabels.ToArray(),
-            $cmPlans.ToArray(), $cmWindows, $cmFacts.ToArray(), $cmSnaps.ToArray(), $cmOverrides)
+            $cmPlans.ToArray(), $cmWindows, $cmFacts.ToArray(), $cmSnaps.ToArray(), $cmOverrides,
+            $chosen.StableKey)
         $cmRedistribution = [TerminalOrganizer.Core.Overflow.CrossMonitorPlanner]::Plan($cmSnapshot)
         Write-Output ('whatif: redistribute planned=' + $cmRedistribution.Moves.Length + ' applied=0 (pure plan; C3 selects policy)')
         foreach ($cmMove in $cmRedistribution.Moves) {

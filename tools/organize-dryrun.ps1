@@ -347,10 +347,14 @@ try {
             $cmOverrides = $cmStore.Load().PriorityOverrides
         }
         catch { $cmOverrides = @() }
+        # Sources are only the organized monitor's own overflow; -AllMonitors organizes
+        # every monitor, so the null key keeps every monitor's overflow as a source.
+        $cmOrganizedKey = $null
+        if (-not $AllMonitors) { $cmOrganizedKey = $chosen.StableKey }
         $cmSnapshot = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose(
             $desktopText, $cmMonitors.ToArray(), $cmZones.ToArray(), $cmLabels.ToArray(),
             $cmPlans.ToArray(), $windows, $cmFacts.ToArray(), $cmSnaps.ToArray(),
-            [TerminalOrganizer.App.PriorityOverride[]]@($cmOverrides))
+            [TerminalOrganizer.App.PriorityOverride[]]@($cmOverrides), $cmOrganizedKey)
         $cmPlan = [TerminalOrganizer.Core.Overflow.CrossMonitorPlanner]::Plan($cmSnapshot)
         Write-Output ('dry run: redistribute planned=' + $cmPlan.Moves.Length + ' applied=0 (pure plan; C3 selects policy)')
         foreach ($cmMove in $cmPlan.Moves) {

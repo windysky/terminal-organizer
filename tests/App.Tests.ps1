@@ -2339,6 +2339,12 @@ function New-C3Controller {
         (New-CFact 'OV-5' -Top 16 -Left 2408 -Width 944 -Height 1120)
     )
     $script:C3PostM1Facts = @((New-CFact 'ST-A' -Top 16 -Left 16 -Width 456 -Height 1120))
+    # Organizing M2 itself (pre phase): one stable occupant on M2 z0, so the run is not
+    # stopped at the zero-windows gate. Used only when M2 is the target.
+    $script:C3M2Facts = @((New-CFact 'M2-A' -Top 16 -Left 1936 -Width 456 -Height 1120))
+    $script:C3M2Snaps = @(
+        (New-CSnap 'M2-A' @('OCM2_A') @((New-CSession 'M2A' 'Local' 'wsl.exe -d Ubuntu --exec m2a.sh')) $true $true)
+    )
 
     $desktopSrc = [TerminalOrganizer.App.CurrentDesktopSource] {
         $script:C3Seq.Add('desktop'); '{00000000-0000-4000-8000-00000000000C}'
@@ -2354,7 +2360,7 @@ function New-C3Controller {
         $script:C3Seq.Add('windows')
         if ($monitor.Number -eq 2) {
             if ($script:C3Phase -eq 'post') { return (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList $script:C3PostFacts, $script:C3Snaps) }
-            return (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList @(), @())
+            return (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList $script:C3M2Facts, $script:C3M2Snaps)
         }
         if ($script:C3Phase -eq 'post') { return (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList $script:C3PostM1Facts, $script:C3Snaps) }
         return (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList $script:C3Facts, $script:C3Snaps)
@@ -2389,7 +2395,16 @@ function New-C3Controller {
     $worldCapture = [TerminalOrganizer.App.OverflowWorldCapture] {
         param($target, $desktop)
         $script:C3Seq.Add('world')
-        $rowM2 = [TerminalOrganizer.App.CapturedMonitorRow]::new(
+        if ($target.Number -eq 2) {
+            # Organizing M2: the OTHER monitor is M1 with its overflowing windows.
+            $rowM1 = [TerminalOrganizer.App.CapturedMonitorRow]::new(
+                $script:C3M1, [TerminalOrganizer.Core.Geometry.Zone[]]$script:C3Zones1, 'M1',
+                (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList $script:C3Facts, $script:C3Snaps))
+            return [TerminalOrganizer.App.CapturedOverflowWorld]::new(
+                [TerminalOrganizer.App.CapturedMonitorRow[]]@($rowM1),
+                [TerminalOrganizer.App.PriorityOverride[]]@())
+        }
+        $rowM2 =[TerminalOrganizer.App.CapturedMonitorRow]::new(
             $script:C3M2, [TerminalOrganizer.Core.Geometry.Zone[]]$script:C3Zones2, 'M2',
             (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList @(), @()))
         [TerminalOrganizer.App.CapturedOverflowWorld]::new(
@@ -2425,7 +2440,7 @@ function New-C3Controller {
         if ($null -ne $script:C3OnDialog) { & $script:C3OnDialog }
         [TerminalOrganizer.App.OverflowChoiceResult]::new($script:C3DialogChoice, $script:C3DialogRemember)
     }
-    @{ Controller = $controller; Prompt = $prompt; M1 = $script:C3M1 }
+    @{ Controller = $controller; Prompt = $prompt; M1 = $script:C3M1; M2 = $script:C3M2 }
 }
 
 function Get-C3FlowTokens {
@@ -2567,6 +2582,61 @@ Describe 'C3 Overflow policy and pre-mutation choice' {
 
     It 'C3 dialog location without a monitor falls back to screen centering' {
         [TerminalOrganizer.App.OverflowChoiceModel]::DialogLocation($null, 460, 240) | Should BeNullOrEmpty
+    }
+
+    It 'C3 composer flags overflow only on the organized monitor' {
+        # Live bug 2026-10-03: organizing the RIGHT monitor (no overflow) pulled the LEFT
+        # monitor's overflow window in as a redistribution source. Sources are only the
+        # organized monitor's own overflow; other monitors stay destinations/occupancy.
+        $h = New-C3Controller
+        $monitors = [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($script:C3M1, $script:C3M2)
+        $zonesPer = New-Object 'TerminalOrganizer.Core.Geometry.Zone[][]' 2
+        $zonesPer[0] = [TerminalOrganizer.Core.Geometry.Zone[]]$script:C3Zones1
+        $zonesPer[1] = [TerminalOrganizer.Core.Geometry.Zone[]]$script:C3Zones2
+        $labels = [string[]]@('M1', 'M2')
+        $facts = [TerminalOrganizer.Core.Assignment.WindowFact[]]$script:C3Facts
+        $snaps = [TerminalOrganizer.Core.Windows.WindowSnapshot[]]$script:C3Snaps
+        $plan1 = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($zonesPer[0], $facts, $null)
+        $plan2 = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($zonesPer[1],
+            [TerminalOrganizer.Core.Assignment.WindowFact[]]@(), $null)
+        $plans = [TerminalOrganizer.Core.Assignment.AssignmentPlan[]]@($plan1, $plan2)
+        $rows = New-Object 'System.Collections.Generic.List[TerminalOrganizer.Core.Windows.EnumeratedWindow]'
+        for ($i = 0; $i -lt $facts.Length; $i++) {
+            $rows.Add([TerminalOrganizer.Core.Windows.EnumeratedWindow]::new($facts[$i].Handle, $script:C3M1,
+                [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true), $snaps[$i].Identity))
+        }
+        $overrides = [TerminalOrganizer.App.PriorityOverride[]]@()
+        $desktopId = '{00000000-0000-4000-8000-00000000000C}'
+
+        # Organized = M2 (no overflow of its own): nothing may be flagged as overflow.
+        $forM2 = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose($desktopId, $monitors,
+            $zonesPer, $labels, $plans, $rows.ToArray(), $facts, $snaps, $overrides, $script:C3M2.StableKey)
+        $forM2.Windows.Length | Should Be 3
+        @($forM2.Windows | Where-Object { $_.Overflow }).Count | Should Be 0
+
+        # Organized = M1: its own overflow (OV-9, OV-5) is flagged; the stable occupant is not.
+        $forM1 = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose($desktopId, $monitors,
+            $zonesPer, $labels, $plans, $rows.ToArray(), $facts, $snaps, $overrides, $script:C3M1.StableKey)
+        @($forM1.Windows | Where-Object { $_.WindowId -eq 'OV-9' })[0].Overflow | Should Be $true
+        @($forM1.Windows | Where-Object { $_.WindowId -eq 'OV-5' })[0].Overflow | Should Be $true
+        @($forM1.Windows | Where-Object { $_.WindowId -eq 'ST-A' })[0].Overflow | Should Be $false
+
+        # Legacy 9-argument form: every monitor's stacked windows are sources.
+        $legacy = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose($desktopId, $monitors,
+            $zonesPer, $labels, $plans, $rows.ToArray(), $facts, $snaps, $overrides)
+        @($legacy.Windows | Where-Object { $_.WindowId -eq 'OV-9' })[0].Overflow | Should Be $true
+        @($legacy.Windows | Where-Object { $_.WindowId -eq 'OV-5' })[0].Overflow | Should Be $true
+        @($legacy.Windows | Where-Object { $_.WindowId -eq 'ST-A' })[0].Overflow | Should Be $false
+    }
+
+    It 'C3 organizing a monitor without overflow never pulls another monitor overflow' {
+        $h = New-C3Controller
+        $result = $h.Controller.RunWithChoice($h.M2, $null, 'M2', $null,
+            [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Ask'),
+            $false, $h.Prompt, $null, [System.Threading.CancellationToken]::None)
+        $script:C3DialogCount | Should Be 0
+        (@($script:C3Seq | Where-Object { $_ -like 'xmove:*' })).Count | Should Be 0
+        $result.Completed | Should Be $true
     }
 
     It 'C3 remember choice persists Stack or Redistribute' {
