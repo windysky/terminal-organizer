@@ -18,14 +18,27 @@ namespace TerminalOrganizer.Core.Assignment
         private readonly bool maximized;
         private readonly bool minimized;
         private readonly bool fullScreen;
+        private readonly FrameMargins margins;
 
         public WindowState(int left, int top, int width, int height, bool maximized, bool minimized, bool fullScreen)
             : this(WindowStateReadStatus.Valid, null, left, top, width, height, maximized, minimized, fullScreen)
         {
         }
 
+        public WindowState(int left, int top, int width, int height, bool maximized, bool minimized, bool fullScreen,
+            FrameMargins margins)
+            : this(WindowStateReadStatus.Valid, null, left, top, width, height, maximized, minimized, fullScreen, margins)
+        {
+        }
+
         public WindowState(WindowStateReadStatus status, string error, int left, int top, int width, int height,
             bool maximized, bool minimized, bool fullScreen)
+            : this(status, error, left, top, width, height, maximized, minimized, fullScreen, FrameMargins.None)
+        {
+        }
+
+        public WindowState(WindowStateReadStatus status, string error, int left, int top, int width, int height,
+            bool maximized, bool minimized, bool fullScreen, FrameMargins margins)
         {
             Status = status;
             Error = error;
@@ -36,6 +49,7 @@ namespace TerminalOrganizer.Core.Assignment
             this.maximized = maximized;
             this.minimized = minimized;
             this.fullScreen = fullScreen;
+            this.margins = margins ?? FrameMargins.None;
         }
 
         public int Left { get { return left; } }
@@ -53,6 +67,9 @@ namespace TerminalOrganizer.Core.Assignment
         public bool Maximized { get { return maximized; } }
         public bool Minimized { get { return minimized; } }
         public bool FullScreen { get { return fullScreen; } }
+
+        /// <summary>The invisible-border margins the rect was corrected by (None when unmeasured).</summary>
+        public FrameMargins Margins { get { return margins; } }
 
         /// <summary>Compatibility degradation value: invalid with a diagnostic zero rect.</summary>
         public static WindowState Degrade()
@@ -72,13 +89,17 @@ namespace TerminalOrganizer.Core.Assignment
     /// via GetWindowRect, its maximized/minimized state via IsZoomed/IsIconic, and its
     /// full-screen status via style inspection (GetWindowLong GWL_STYLE) plus the monitor
     /// rect (MonitorFromWindow/GetMonitorInfo) feeding the pinned pure computation
-    /// IsFullScreenWindow. A failed read returns an explicitly invalid state,
+    /// IsFullScreenWindow. The reported rect is the VISIBLE
+    /// frame (DwmGetWindowAttribute DWMWA_EXTENDED_FRAME_BOUNDS, the invisible resize border
+    /// removed, FancyZones-style) so it compares directly against a zone; when the DWM read
+    /// fails or the window is minimized the raw GetWindowRect is kept. A failed read returns an explicitly invalid state,
     /// never an exception. The live style inspection is a morning-checklist surface.
     /// </summary>
     // @MX:WARN: [AUTO] real-screen surface, morning checklist (tools/organize-dryrun.ps1); not an acceptance claim.
     public sealed class WindowStateReader
     {
         private const int GwlStyle = -16;
+        private const int DwmwaExtendedFrameBounds = 9;
 
         private const long WsCaption = 0x00C00000L;
         private const long WsThickframe = 0x00040000L;
@@ -115,7 +136,28 @@ namespace TerminalOrganizer.Core.Assignment
                     return WindowState.Invalid(WindowStateReadStatus.MonitorUnavailable, "monitor information unavailable");
                 bool fullScreen = IsFullScreenWindow(style, left, top, width, height,
                     info.rcMonitor.Left, info.rcMonitor.Top, info.rcMonitor.Right - info.rcMonitor.Left, info.rcMonitor.Bottom - info.rcMonitor.Top);
-                return new WindowState(left, top, width, height, maximized, minimized, fullScreen);
+                FrameMargins margins = FrameMargins.None;
+                if (!minimized)
+                {
+                    NativeMethods.Rect frame;
+                    int hr = NativeMethods.DwmGetWindowAttribute(handle, DwmwaExtendedFrameBounds, out frame,
+                        Marshal.SizeOf(typeof(NativeMethods.Rect)));
+                    if (hr == 0)
+                    {
+                        margins = FrameBounds.Measure(rect.Left, rect.Top, rect.Right, rect.Bottom,
+                            frame.Left, frame.Top, frame.Right, frame.Bottom);
+                        int[] visible = FrameBounds.VisibleRect(left, top, width, height, margins);
+                        if (visible[2] > 0 && visible[3] > 0)
+                        {
+                            left = visible[0]; top = visible[1]; width = visible[2]; height = visible[3];
+                        }
+                        else
+                        {
+                            margins = FrameMargins.None;
+                        }
+                    }
+                }
+                return new WindowState(left, top, width, height, maximized, minimized, fullScreen, margins);
             }
             catch (Exception ex)
             {
@@ -151,6 +193,9 @@ namespace TerminalOrganizer.Core.Assignment
 
             [DllImport("user32.dll")]
             public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+            [DllImport("dwmapi.dll")]
+            public static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out Rect value, int size);
 
             [DllImport("user32.dll")]
             public static extern bool IsZoomed(IntPtr window);

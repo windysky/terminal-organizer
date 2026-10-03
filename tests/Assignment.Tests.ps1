@@ -552,6 +552,64 @@ Describe 'AC-011 WindowStateReader surface and degradation' {
     }
 }
 
+# --- Invisible-border compensation (FancyZones parity) ---
+# Windows 10/11 top-level windows carry an invisible resize border: the visible frame
+# (DWMWA_EXTENDED_FRAME_BOUNDS) is inset from GetWindowRect. Expected values are real
+# measurements of Windows Terminal at 96 dpi, never derived from the code under test.
+Describe 'Frame bounds (invisible borders match FancyZones)' {
+    $frameBounds = [TerminalOrganizer.Core.Assignment.FrameBounds]
+    $margins = [TerminalOrganizer.Core.Assignment.FrameMargins]
+
+    It 'Measure derives frame-minus-window margins from a real WT rect pair' {
+        # window (647,16)-(1271,1016) vs frame (654,16)-(1264,1009) => 7,0,-7,-7
+        $m = $frameBounds::Measure(647, 16, 1271, 1016, 654, 16, 1264, 1009)
+        $m.Left | Should Be 7
+        $m.Top | Should Be 0
+        $m.Right | Should Be -7
+        $m.Bottom | Should Be -7
+    }
+
+    It 'ExpandTarget of zone z4 (463x509 @ 2864,5) yields the live FancyZones-placed outer rect' {
+        $m = $margins::new(7, 0, -7, -7)
+        $r = $frameBounds::ExpandTarget(2864, 5, 463, 509, $m)
+        ($r -join ',') | Should BeExactly '2857,5,477,516'
+    }
+
+    It 'VisibleRect of the FancyZones-placed outer rect (2857,5 477x516) is exactly the zone' {
+        $m = $margins::new(7, 0, -7, -7)
+        $r = $frameBounds::VisibleRect(2857, 5, 477, 516, $m)
+        ($r -join ',') | Should BeExactly '2864,5,463,509'
+    }
+
+    It 'ExpandTarget and VisibleRect are exact inverses' {
+        $m = $margins::new(7, 0, -7, -7)
+        $outer = $frameBounds::ExpandTarget(100, 20, 800, 600, $m)
+        $back = $frameBounds::VisibleRect($outer[0], $outer[1], $outer[2], $outer[3], $m)
+        ($back -join ',') | Should BeExactly '100,20,800,600'
+    }
+
+    It 'FrameMargins.None and a null margins argument are identity for both directions' {
+        (($frameBounds::ExpandTarget(10, 20, 300, 200, $margins::None)) -join ',') | Should BeExactly '10,20,300,200'
+        (($frameBounds::VisibleRect(10, 20, 300, 200, $margins::None)) -join ',') | Should BeExactly '10,20,300,200'
+        (($frameBounds::ExpandTarget(10, 20, 300, 200, $null)) -join ',') | Should BeExactly '10,20,300,200'
+        (($frameBounds::VisibleRect(10, 20, 300, 200, $null)) -join ',') | Should BeExactly '10,20,300,200'
+        $margins::None.Left | Should Be 0
+        $margins::None.Top | Should Be 0
+        $margins::None.Right | Should Be 0
+        $margins::None.Bottom | Should Be 0
+    }
+
+    It 'a WindowState built with margins exposes them; the legacy 7-arg constructor reports None' {
+        $m = $margins::new(7, 0, -7, -7)
+        $withMargins = [TerminalOrganizer.Core.Assignment.WindowState]::new(2864, 5, 463, 509, $false, $false, $false, $m)
+        $withMargins.Margins.Left | Should Be 7
+        $withMargins.Margins.Right | Should Be -7
+        $withMargins.Margins.Bottom | Should Be -7
+        $legacy = [TerminalOrganizer.Core.Assignment.WindowState]::new(0, 0, 400, 300, $false, $false, $false)
+        [object]::ReferenceEquals($legacy.Margins, $margins::None) | Should Be $true
+    }
+}
+
 # --- B5: dry-run scoping parity (night-design-2026-09-25 unit B5, test 6) ---
 # The dry-run self-test must pin the production scope rule: a monitor's plan consumes
 # only that monitor's windows (WindowScope.Filter; never re-implemented in PowerShell).

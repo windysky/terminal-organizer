@@ -50,8 +50,9 @@ namespace TerminalOrganizer.Core.Assignment
     /// Applies an assignment plan to the live desktop (REQ-PLC-001): each restore-first
     /// window via ShowWindow(SW_RESTORE) — Windows itself may briefly activate on restore
     /// (spec D-C) — then SetWindowPos to the target rect with SWP_NOACTIVATE |
-    /// SWP_NOZORDER so the move never steals focus or changes Z order. No-move windows are
-    /// skipped. A Win32 failure on one window never stops the others and is reported per
+    /// SWP_NOZORDER so the move never steals focus or changes Z order. The target rect is
+    /// grown by the window's invisible resize border (FrameBounds) so the VISIBLE frame, not
+    /// the outer rect, lands on the zone, as FancyZones does. No-move windows are skipped. A Win32 failure on one window never stops the others and is reported per
     /// window; Apply never throws. Real-screen behaviour is the morning checklist
     /// (tools/organize-dryrun.ps1 live mode prints the plan; this wrapper is what the
     /// tray app will call, SPEC-TRAY-007).
@@ -60,6 +61,7 @@ namespace TerminalOrganizer.Core.Assignment
     public sealed class WindowPlacer
     {
         private const int SwRestore = 9;
+        private const int DwmwaExtendedFrameBounds = 9;
         private const uint SwpNoZOrder = 0x0004;
         private const uint SwpNoActivate = 0x0010;
         private readonly Func<PlannedMove, bool> moveWindow;
@@ -175,10 +177,28 @@ namespace TerminalOrganizer.Core.Assignment
             return new WindowPlacementResult(move.Handle, move.WindowId, true, false, error);
         }
 
+        /// <summary>
+        /// Moves one window so its VISIBLE frame lands on the zone (FancyZones parity): the
+        /// invisible resize border is measured live (GetWindowRect vs DWMWA_EXTENDED_FRAME_BOUNDS,
+        /// after any restore) and the zone is grown by it for SetWindowPos. A failed DWM read
+        /// falls back to the raw zone rect (no margins).
+        /// </summary>
         private static bool NativeMove(PlannedMove move)
         {
-            return NativeMethods.SetWindowPos(move.Handle, IntPtr.Zero, move.TargetLeft, move.TargetTop,
-                move.TargetWidth, move.TargetHeight, SwpNoActivate | SwpNoZOrder);
+            FrameMargins margins = FrameMargins.None;
+            NativeMethods.Rect window;
+            NativeMethods.Rect frame;
+            if (NativeMethods.GetWindowRect(move.Handle, out window)
+                && NativeMethods.DwmGetWindowAttribute(move.Handle, DwmwaExtendedFrameBounds, out frame,
+                    Marshal.SizeOf(typeof(NativeMethods.Rect))) == 0)
+            {
+                margins = FrameBounds.Measure(window.Left, window.Top, window.Right, window.Bottom,
+                    frame.Left, frame.Top, frame.Right, frame.Bottom);
+            }
+            int[] outer = FrameBounds.ExpandTarget(move.TargetLeft, move.TargetTop,
+                move.TargetWidth, move.TargetHeight, margins);
+            return NativeMethods.SetWindowPos(move.Handle, IntPtr.Zero, outer[0], outer[1],
+                outer[2], outer[3], SwpNoActivate | SwpNoZOrder);
         }
 
         /// <summary>Hand-written P/Invoke declarations (tech.md; no assembly reference needed).</summary>
@@ -191,6 +211,21 @@ namespace TerminalOrganizer.Core.Assignment
             [DllImport("user32.dll", SetLastError = true)]
             public static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter,
                 int x, int y, int cx, int cy, uint flags);
+
+            [DllImport("user32.dll")]
+            public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+            [DllImport("dwmapi.dll")]
+            public static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out Rect value, int size);
+
+            [StructLayout(LayoutKind.Sequential)]
+            public struct Rect
+            {
+                public int Left;
+                public int Top;
+                public int Right;
+                public int Bottom;
+            }
         }
     }
 }
