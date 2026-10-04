@@ -1,4 +1,5 @@
 using System;
+using TerminalOrganizer.Core.Rules;
 
 namespace TerminalOrganizer.Core.Windows
 {
@@ -8,40 +9,17 @@ namespace TerminalOrganizer.Core.Windows
     /// uppercase classes, a SINGLE rank digit (C1; multi-digit needs a future grammar change).
     /// A title without a valid prefix returns unchanged; a second prefix survives (a
     /// window_name may itself contain '_'). An empty session title after a prefix is invalid
-    /// and is not stripped. Never throws; null passes through as null.
+    /// and is not stripped. Never throws; null passes through as null. The grammar itself lives
+    /// in the launcher-prefix preset (SPEC-RULES-008); this class is the adapter.
     /// </summary>
     public static class TitleNormalizer
     {
-        // @MX:NOTE: C1 grammar entry — the matcher path (StripPrefix) and the priority model
-        // (DeclaredRank) both consume this parse; the rank digit is never a family/context letter.
+        // @MX:NOTE: adapter over LauncherPrefixPreset (the single home of the C1 grammar); the matcher path
+        // (StripPrefix) and the priority model (DeclaredRank) both consume it. Session binding stays on this
+        // path whatever rule set is configured; the rank digit is never a family/context letter.
         public static NormalizedTitle Parse(string title)
         {
-            if (title == null || title.Length < 3)
-            {
-                return Unchanged(title);
-            }
-            if (title[0] != 'O' && title[0] != 'H' && title[0] != 'N' && title[0] != 'W')
-            {
-                return Unchanged(title);
-            }
-            if (title[1] != 'C' && title[1] != 'G' && title[1] != 'D')
-            {
-                return Unchanged(title);
-            }
-            if (title[2] == '_')
-            {
-                return Stripped(title, 3, null);
-            }
-            if (title[2] >= '0' && title[2] <= '9')
-            {
-                // Rank form: the digit must be followed by '_' and a non-empty session title.
-                if (title.Length < 4 || title[3] != '_')
-                {
-                    return Unchanged(title);
-                }
-                return Stripped(title, 4, title[2] - '0');
-            }
-            return Unchanged(title);
+            return LauncherPrefixPreset.Parse(title);
         }
 
         // @MX:NOTE: one-prefix rule, product.md decision 1 (OC_YODA1 -> YODA1; NG_AB_X -> AB_X, not X);
@@ -50,21 +28,6 @@ namespace TerminalOrganizer.Core.Windows
         {
             NormalizedTitle parsed = Parse(title);
             return parsed.SessionTitle;
-        }
-
-        private static NormalizedTitle Stripped(string title, int sessionStart, int? declaredRank)
-        {
-            if (title.Length == sessionStart)
-            {
-                // Empty session title after a prefix is invalid and is not stripped.
-                return Unchanged(title);
-            }
-            return new NormalizedTitle(title, title.Substring(sessionStart), true, declaredRank);
-        }
-
-        private static NormalizedTitle Unchanged(string title)
-        {
-            return new NormalizedTitle(title, title, false, null);
         }
     }
 }

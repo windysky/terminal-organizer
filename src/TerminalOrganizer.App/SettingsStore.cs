@@ -4,6 +4,7 @@ using System.IO;
 using System.Web.Script.Serialization;
 using TerminalOrganizer.Core.Assignment;
 using TerminalOrganizer.Core.Overflow;
+using TerminalOrganizer.Core.Rules;
 
 namespace TerminalOrganizer.App
 {
@@ -21,8 +22,8 @@ namespace TerminalOrganizer.App
     /// </summary>
     public sealed class AppSettings
     {
-        /// <summary>The C3 settings schema version; a file without the field loads as this.</summary>
-        public const int DefaultSchemaVersion = 2;
+        /// <summary>The settings schema version written by default (3 since SPEC-RULES-009: the title-rules block).</summary>
+        public const int DefaultSchemaVersion = 3;
 
         private readonly string hotkey;
         private readonly string logPath;
@@ -34,6 +35,7 @@ namespace TerminalOrganizer.App
         private readonly int schemaVersion;
         private readonly OverflowPolicy overflowPolicy;
         private readonly bool crossMonitorRedistribution;
+        private readonly TitleRulesSettings titleRules;
 
         public AppSettings(string hotkey, string logPath, string managerWindowName)
             : this(hotkey, logPath, managerWindowName, false)
@@ -86,7 +88,22 @@ namespace TerminalOrganizer.App
             bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
             PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
             bool crossMonitorRedistribution)
+            : this(hotkey, logPath, managerWindowName, mergeEnabled, firstRunCompleted, startWithWindows,
+                managerSelector, priorityOverrides, schemaVersion, overflowPolicy, crossMonitorRedistribution, null)
         {
+        }
+
+        /// <summary>
+        /// SPEC-RULES-009 form: also carries the title-rules value (the block exactly as read plus the
+        /// effective preset, default rank and rule set). A null value means "this settings value carries no
+        /// block": a save then writes the block that loading the current file yields (REQ-SET-002).
+        /// </summary>
+        public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
+            bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
+            PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
+            bool crossMonitorRedistribution, TitleRulesSettings titleRules)
+        {
+            this.titleRules = titleRules;
             this.MergeEnabled = mergeEnabled;
             this.hotkey = hotkey;
             this.logPath = logPath;
@@ -131,6 +148,15 @@ namespace TerminalOrganizer.App
         /// <summary>The C3 cross-monitor mirror: true exactly while the policy is Redistribute.</summary>
         public bool CrossMonitorRedistribution { get { return crossMonitorRedistribution; } }
 
+        /// <summary>True when this value was built with a title-rules value (Load and the 12-argument constructor do).</summary>
+        public bool HasTitleRules { get { return titleRules != null; } }
+
+        /// <summary>The title-rules value; never null (a value built without one behaves as preset none).</summary>
+        public TitleRulesSettings TitleRules
+        {
+            get { return titleRules ?? TitleRulesSettings.Fresh(); }
+        }
+
         private static ManagerSelector DeriveSelector(string managerWindowName)
         {
             return string.IsNullOrEmpty(managerWindowName)
@@ -141,6 +167,231 @@ namespace TerminalOrganizer.App
         public override string ToString()
         {
             return string.Format("hotkey={0}|log={1}|manager={2}", hotkey, logPath, managerWindowName == null ? "-" : managerWindowName);
+        }
+    }
+
+    /// <summary>
+    /// The title-rules value of one settings read (SPEC-RULES-009 REQ-SET-001..003): the block exactly as the
+    /// file's generic JSON form held it (malformed definitions, unknown keys and invalid parts included, so a
+    /// save writes it back verbatim), plus the effective preset, default rank and rule set that behaviour uses.
+    /// An invalid part loads as its default for behaviour with one diagnostic, never an exception. Immutable;
+    /// array properties return copies. The rule set is built once per read (NFR-2).
+    /// </summary>
+    // @MX:NOTE: generic-form parse; block kept verbatim, invalid parts included; fallback block on save.
+    public sealed class TitleRulesSettings
+    {
+        public const string PresetNone = "none";
+        public const string PresetLauncherPrefix = "launcher-prefix";
+        public const int DefaultRankValue = 500;
+
+        private readonly bool hasRawBlock;
+        private readonly object rawBlock;
+        private readonly bool presetEnabled;
+        private readonly int defaultRank;
+        private readonly object[] ruleDefinitions;
+        private readonly RuleSet ruleSet;
+        private readonly string[] diagnosticLines;
+        private readonly string[] diagnosticKeys;
+
+        private TitleRulesSettings(bool hasRawBlock, object rawBlock, bool presetEnabled, int defaultRank,
+            object[] ruleDefinitions, List<string> settingDiagnostics, List<string> settingKeys)
+        {
+            this.hasRawBlock = hasRawBlock;
+            this.rawBlock = rawBlock;
+            this.presetEnabled = presetEnabled;
+            this.defaultRank = defaultRank;
+            this.ruleDefinitions = ruleDefinitions ?? new object[0];
+            this.ruleSet = RuleSetBuilder.Build(this.ruleDefinitions, presetEnabled);
+            List<string> lines = new List<string>(settingDiagnostics);
+            List<string> keys = new List<string>(settingKeys);
+            foreach (RuleDiagnostic diagnostic in ruleSet.Diagnostics)
+            {
+                string line = "title rule " + diagnostic.Position + " skipped: " + diagnostic.Reason;
+                lines.Add(line);
+                keys.Add(line + "|" + Describe(DefinitionAt(diagnostic.Position)));
+            }
+            this.diagnosticLines = lines.ToArray();
+            this.diagnosticKeys = keys.ToArray();
+        }
+
+        /// <summary>The fresh-install value: preset none, no rules, default rank 500 (written as an explicit block).</summary>
+        public static TitleRulesSettings Fresh()
+        {
+            return new TitleRulesSettings(false, null, false, DefaultRankValue, null, new List<string>(), new List<string>());
+        }
+
+        /// <summary>The migration value for a file of schema version 0, 1 or 2: preset on, no user rules.</summary>
+        public static TitleRulesSettings Migrated()
+        {
+            return new TitleRulesSettings(false, null, true, DefaultRankValue, null, new List<string>(), new List<string>());
+        }
+
+        /// <summary>
+        /// Reads the title-rules block from its generic JSON form (null when the file has none). Never throws:
+        /// a part that is not valid loads as its default with one diagnostic and keeps its original value.
+        /// </summary>
+        public static TitleRulesSettings FromBlock(object block)
+        {
+            if (block == null)
+            {
+                return Fresh();
+            }
+            List<string> lines = new List<string>();
+            List<string> keys = new List<string>();
+            try
+            {
+                System.Collections.IDictionary map = block as System.Collections.IDictionary;
+                if (map == null)
+                {
+                    AddSettingDiagnostic(lines, keys, "titleRules must be an object", block);
+                    return new TitleRulesSettings(true, block, false, DefaultRankValue, null, lines, keys);
+                }
+                bool presetOn = false;
+                object preset = Field(map, "preset");
+                if (preset != null)
+                {
+                    if (preset is string && string.Equals((string)preset, PresetLauncherPrefix, StringComparison.Ordinal))
+                    {
+                        presetOn = true;
+                    }
+                    else if (!(preset is string && string.Equals((string)preset, PresetNone, StringComparison.Ordinal)))
+                    {
+                        AddSettingDiagnostic(lines, keys, "preset must be launcher-prefix or none", preset);
+                    }
+                }
+                int rank = DefaultRankValue;
+                object rankValue = Field(map, "defaultRank");
+                if (rankValue != null)
+                {
+                    long parsed;
+                    if (TryReadInteger(rankValue, out parsed) && parsed >= RuleSetBuilder.RankMin && parsed <= RuleSetBuilder.RankMax)
+                    {
+                        rank = (int)parsed;
+                    }
+                    else
+                    {
+                        AddSettingDiagnostic(lines, keys, "defaultRank must be an integer from 0 to 999", rankValue);
+                    }
+                }
+                object[] definitions = new object[0];
+                object rulesValue = Field(map, "rules");
+                if (rulesValue != null)
+                {
+                    System.Collections.IEnumerable list = rulesValue as System.Collections.IEnumerable;
+                    if (list == null || rulesValue is string || rulesValue is System.Collections.IDictionary)
+                    {
+                        AddSettingDiagnostic(lines, keys, "rules must be an array", rulesValue);
+                    }
+                    else
+                    {
+                        List<object> items = new List<object>();
+                        foreach (object item in list)
+                        {
+                            items.Add(item);
+                        }
+                        definitions = items.ToArray();
+                    }
+                }
+                return new TitleRulesSettings(true, block, presetOn, rank, definitions, lines, keys);
+            }
+            catch (Exception ex)
+            {
+                // NFR-3: a hostile value never escapes; fall back to the defaults for behaviour.
+                List<string> failed = new List<string>();
+                List<string> failedKeys = new List<string>();
+                AddSettingDiagnostic(failed, failedKeys, "could not be read: " + ex.Message, block);
+                return new TitleRulesSettings(true, block, false, DefaultRankValue, null, failed, failedKeys);
+            }
+        }
+
+        /// <summary>The effective preset name: "launcher-prefix" or "none".</summary>
+        public string Preset { get { return presetEnabled ? PresetLauncherPrefix : PresetNone; } }
+
+        public bool PresetEnabled { get { return presetEnabled; } }
+
+        /// <summary>The effective default rank (0..999) applied to a window without a rule rank.</summary>
+        public int DefaultRank { get { return defaultRank; } }
+
+        /// <summary>The rule definitions as read, in order (empty when the block had none or they were not an array).</summary>
+        public object[] RuleDefinitions { get { return (object[])ruleDefinitions.Clone(); } }
+
+        /// <summary>The rule set built from this read (the preset first when enabled).</summary>
+        public RuleSet RuleSet { get { return ruleSet; } }
+
+        /// <summary>One line per diagnostic of this read, in the log format of plan.md J.4.</summary>
+        public string[] DiagnosticLines { get { return (string[])diagnosticLines.Clone(); } }
+
+        /// <summary>Writes this read's diagnostics through the de-duplicating sink (one line per distinct diagnostic per process).</summary>
+        internal void ReportDiagnostics(Action<string> sink)
+        {
+            if (sink == null)
+            {
+                return;
+            }
+            for (int i = 0; i < diagnosticLines.Length; i++)
+            {
+                RuleDiagnosticLog.Report(sink, diagnosticLines[i], diagnosticKeys[i]);
+            }
+        }
+
+        /// <summary>The JSON value a save writes: the block as read, or an explicit block built from the effective values.</summary>
+        internal object ToJsonValue()
+        {
+            if (hasRawBlock)
+            {
+                return rawBlock;
+            }
+            Dictionary<string, object> block = new Dictionary<string, object>();
+            block["preset"] = Preset;
+            block["defaultRank"] = defaultRank;
+            block["rules"] = ruleDefinitions;
+            return block;
+        }
+
+        private object DefinitionAt(int position)
+        {
+            return position >= 1 && position <= ruleDefinitions.Length ? ruleDefinitions[position - 1] : null;
+        }
+
+        private static void AddSettingDiagnostic(List<string> lines, List<string> keys, string reason, object value)
+        {
+            string line = "title rules: " + reason;
+            lines.Add(line);
+            keys.Add(line + "|" + Describe(value));
+        }
+
+        private static string Describe(object value)
+        {
+            try
+            {
+                return new JavaScriptSerializer().Serialize(value);
+            }
+            catch (Exception)
+            {
+                return string.Empty;
+            }
+        }
+
+        private static object Field(System.Collections.IDictionary map, string key)
+        {
+            return map.Contains(key) ? map[key] : null;
+        }
+
+        /// <summary>True for the integral CLR types a JSON reader yields for an integer (never for decimals, doubles, strings).</summary>
+        private static bool TryReadInteger(object value, out long result)
+        {
+            result = 0;
+            if (value is int)
+            {
+                result = (int)value;
+                return true;
+            }
+            if (value is long)
+            {
+                result = (long)value;
+                return true;
+            }
+            return false;
         }
     }
 
@@ -216,11 +467,17 @@ namespace TerminalOrganizer.App
         /// <summary>The D-3 defaults: hotkey "Ctrl+Alt+O", default log path, no manager.</summary>
         public static AppSettings Defaults()
         {
-            return new AppSettings(DefaultHotkey, DefaultLogPath(), null);
+            return new AppSettings(DefaultHotkey, DefaultLogPath(), null, false, false, false,
+                null, null, AppSettings.DefaultSchemaVersion, OverflowPolicy.Ask, false, TitleRulesSettings.Fresh());
         }
 
         /// <summary>Loads the settings; tolerant — never throws for file content.</summary>
         public AppSettings Load()
+        {
+            return LoadCore(true);
+        }
+
+        private AppSettings LoadCore(bool report)
         {
             try
             {
@@ -241,10 +498,17 @@ namespace TerminalOrganizer.App
                 // C3: unknown policy text loads as Ask; the cross-monitor mirror is kept
                 // coherent with the loaded policy (true only while Redistribute).
                 OverflowPolicy policy = OverflowPolicyParser.Parse(dto.overflowPolicy);
+                // @MX:NOTE: raw version 0/1/2 means preset on; decided before normalization (SPEC-RULES-009 REQ-SET-003).
+                bool legacy = dto.schemaVersion <= 2;
+                TitleRulesSettings rules = legacy ? TitleRulesSettings.Migrated() : TitleRulesSettings.FromBlock(dto.titleRules);
+                if (report)
+                {
+                    rules.ReportDiagnostics(log);
+                }
                 return new AppSettings(hotkey, logPath, manager, dto.mergeEnabled,
                     dto.firstRunCompleted, dto.startWithWindows, ParseSelector(dto.managerSelector),
-                    ParseOverrides(dto.priorityOverrides), dto.schemaVersion, policy,
-                    policy == OverflowPolicy.Redistribute && dto.crossMonitorRedistribution);
+                    ParseOverrides(dto.priorityOverrides), legacy ? AppSettings.DefaultSchemaVersion : dto.schemaVersion, policy,
+                    policy == OverflowPolicy.Redistribute && dto.crossMonitorRedistribution, rules);
             }
             catch (Exception ex)
             {
@@ -280,6 +544,10 @@ namespace TerminalOrganizer.App
                 dto.schemaVersion = values.SchemaVersion;
                 dto.overflowPolicy = OverflowPolicyParser.Format(values.OverflowPolicy);
                 dto.crossMonitorRedistribution = values.CrossMonitorRedistribution;
+                // @MX:NOTE: generic-form parse; block kept verbatim, invalid parts included; fallback block on save.
+                // A value without a title-rules value (an older constructor) writes what loading the current file yields.
+                TitleRulesSettings block = values.HasTitleRules ? values.TitleRules : LoadCore(false).TitleRules;
+                dto.titleRules = block.ToJsonValue();
                 string directory = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(directory))
                 {
@@ -442,6 +710,9 @@ namespace TerminalOrganizer.App
             public int schemaVersion;
             public string overflowPolicy;
             public bool crossMonitorRedistribution;
+
+            /// <summary>The title-rules block in generic form (never a typed shape): a bad value inside it cannot degrade the file.</summary>
+            public object titleRules;
         }
 
         /// <summary>The persisted B2 canonical manager selector shape; public fields so JavaScriptSerializer maps them.</summary>

@@ -46,36 +46,58 @@ Right-click the tray icon:
 | **Organize a specific monitor** | Submenu lists your monitors with physical labels like `Left — 1920×1080` or `Right (Primary)` |
 | **Manager** | Pin one window as the *manager* — it is protected and exempt from stacking. **Show** flashes it so you can find it; **Clear** unpins it |
 | **Overflow behavior policy** | Choose what happens when windows don't all fit (see below) |
-| **Labels and priorities** | Set labels and priorities by hand; overrides are persisted in settings |
+| **Labels and priorities** | Set labels by hand and see every window's rank and where it came from; ranks set by hand live in `priorityOverrides` in settings |
 | **Last result** | Exact counts from the most recent organize |
 | **Open log** / **Exit** | Open the log file / quit the app |
 
-### Window titles as the priority channel
+### Title rules: where each window's rank comes from
 
-A short prefix token in a window's title declares its priority:
+Every window gets an identity name and a rank from its tab titles. Priorities matter when windows overflow: **the lowest-priority windows are moved first** (a lower number means a higher priority).
 
+The rules live in `%LOCALAPPDATA%\TerminalOrganizer\settings.json`, in the `titleRules` block. The tray menu has no rule editor; edit the file, and the next organize run, menu rebuild or tool run picks the change up without a restart. Rules are only read from a settings file with `"schemaVersion": 3`. A file that still says 2 (or an older number, or no version) gets its `titleRules` block ignored and replaced with the launcher-prefix default the next time the app saves, so check that the version is 3 before you add rules. The app writes 3 the first time it saves settings after the upgrade, for example after you choose a manager window.
+
+```json
+"titleRules": {
+  "preset": "launcher-prefix",
+  "defaultRank": 500,
+  "rules": [
+    { "match": "PowerShell*", "rank": 200 }
+  ]
+}
 ```
-<family><context>_<session>
-<family><context><rank>_<session>
-```
 
-- **family** — one letter from `O`, `H`, `N`, `W`
-- **context** — one letter from `C`, `G`, `D`
-- **rank** — an optional single digit `0`–`9`; **lower number = higher priority**
-- **session** — the session name; everything after the first `_` (it may itself contain underscores)
+- `preset` is `"launcher-prefix"` or `"none"` (exactly, lowercase).
+- `defaultRank` is a whole number from 0 to 999: the rank of a window that no rule and no session ranks. It defaults to 500.
+- `rules` is an ordered list. The first rule that matches a tab decides that tab; later rules are not consulted. A rule that is malformed is skipped and written to the log once; the other rules still apply.
 
-The token is case-sensitive and uppercase. A title without a valid prefix is simply left as-is. In Windows Terminal, renaming the tab is the easiest way to set the title.
+Five example rules:
 
-Examples:
+1. Glob word: `{ "match": "PowerShell*", "rank": 200 }`. A pattern without `regex:` is a glob (`*` any run, `?` one character, case ignored) and must cover the whole title.
+2. Single-letter regex: `{ "match": "regex:^[A-Z]:", "rank": 150 }`. Titles that start with a drive letter, such as `C:\work`.
+3. Regex with name and rank captures: `{ "match": "regex:^(?<rank>[0-9]{1,3})-(?<name>.+)$" }`. The `name` capture becomes the identity name and the `rank` capture the rank.
+4. Marker: `{ "marker": "#" }`. The title `~/proj #3 — zsh` means rank 3 and name `~/proj — zsh`.
+5. Command-line match: `{ "match": "*--attach YODA*", "on": "commandline", "rank": 250 }`.
 
-| Title prefix | Session | Rank | Effect |
-| --- | --- | --- | --- |
-| `HG2_YODA1` | `YODA1` | 2 | High priority |
-| `NC0_BUILD` | `BUILD` | 0 | Top priority |
-| `WD9_SCRATCH` | `SCRATCH` | 9 | Lowest priority — moved first during redistribution |
-| `OC_EDITOR` | `EDITOR` | — | Identity only; no rank declared |
+A rule may also set a fixed `name` and a fixed `rank`. The identity name comes from a `name` capture, else the rule's `name`, else the trimmed title.
 
-Priorities matter when windows overflow: **the lowest-priority windows are moved first**. If you prefer not to encode priorities in titles, set them by hand under **Labels and priorities** in the tray menu — manual overrides are saved to settings.
+**The `launcher-prefix` preset** is the old title grammar, kept as a built-in rule that is evaluated before your own rules: a leading token of a family letter from `O H N W`, a context letter from `C G D`, an optional single digit and `_`, then the session name. `HG2_YODA1` is the session `YODA1` with rank 2; `OC_EDITOR` is `EDITOR` with no rank. A settings file written by an earlier version has the preset switched on when it is upgraded, so nothing changes for existing users. A new install starts with `"preset": "none"`.
+
+**Precedence.** A window's rank is the first of these that applies:
+
+1. a rank you set by hand, as a `priorityOverrides` entry in settings.json;
+2. the rank a title rule supplies (the preset first, then your rules in order);
+3. the session class: Windows-native 100, local 300, remote 400; a window you labeled by hand counts as 300;
+4. the default rank.
+
+**Menu and tools.** Under **Labels and priorities**, every window is listed as `title (as identity) · rank N · where it came from`, for example `powershell · rank 200 · rule 1: PowerShell*`. Rows of windows that belong to a launcher session are for information only; the others keep the label action, which sets a label, not a rank. `tools\organize-dryrun.ps1` and `tools\organize-once.ps1 -WhatIf` print the same text, one `window:` line per window. Every window with a non-blank title can be chosen as the manager.
+
+**Things to know**
+
+- Identity follows the title, so a renamed window is a new identity. A manager or priority choice saved by identity keeps working while a rule still maps the new title to the same name; use a `name` capture or a fixed `name` when a title changes with the running command.
+- Command-line rules apply only to launcher-session tabs: plain PowerShell, cmd and ssh windows have no command line to match.
+- A settings file that is missing at upgrade, or that is reset after corruption, starts with the preset off.
+
+If you prefer not to put priorities in titles, add `priorityOverrides` entries to settings.json, for example `"priorityOverrides": [ { "kind": "identity", "value": "YODA1", "rank": 120 } ]` (`kind` is `session`, `userlabel`, `rawtitle` or `identity`, case ignored; `rank` is 0 to 999). The tray menu does not set ranks; it shows each window's rank and where it came from.
 
 ### When windows don't all fit
 
@@ -166,6 +188,7 @@ In `%LOCALAPPDATA%\TerminalOrganizer\settings.json`.
 - **Maximized or minimized windows are restored first; full-screen windows are skipped.**
 - **Session merge is a supervised command-line drill**, not a menu action, and stays off unless you run it yourself.
 - **Single instance.** A second copy exits immediately; the running one keeps the hotkey.
+- **A window's identity follows the window title.** Rename a tab and the window is a new identity; a manager or priority choice saved by identity keeps applying only while a title rule still maps the new title to the same name.
 
 ## License
 

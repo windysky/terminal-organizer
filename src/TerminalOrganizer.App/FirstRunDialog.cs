@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using TerminalOrganizer.Core.Overflow;
 
 namespace TerminalOrganizer.App
 {
@@ -69,8 +70,10 @@ namespace TerminalOrganizer.App
             }
             FirstRunResult result = show(applicationIcon, settings.Hotkey, settings.StartWithWindows);
             bool startWith = result == null ? settings.StartWithWindows : result.StartWithWindows;
+            // REQ-SET-002: the first-run save carries the title-rules value of the settings it read.
             AppSettings updated = new AppSettings(settings.Hotkey, settings.LogPath,
-                settings.ManagerWindowName, settings.MergeEnabled, true, startWith);
+                settings.ManagerWindowName, settings.MergeEnabled, true, startWith, null, null,
+                AppSettings.DefaultSchemaVersion, OverflowPolicy.Ask, false, settings.TitleRules);
             if (store != null)
             {
                 store.Save(updated);

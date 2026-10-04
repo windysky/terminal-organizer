@@ -232,9 +232,17 @@ namespace TerminalOrganizer.App
     {
         private readonly CapturedMonitorRow[] otherMonitors;
         private readonly PriorityOverride[] priorityOverrides;
+        private readonly int defaultRank;
 
         public CapturedOverflowWorld(CapturedMonitorRow[] otherMonitors, PriorityOverride[] priorityOverrides)
+            : this(otherMonitors, priorityOverrides, 500)
         {
+        }
+
+        /// <summary>SPEC-RULES-009: also carries the default rank of the capture's own settings read (the 2-parameter form means 500).</summary>
+        public CapturedOverflowWorld(CapturedMonitorRow[] otherMonitors, PriorityOverride[] priorityOverrides, int defaultRank)
+        {
+            this.defaultRank = defaultRank;
             this.otherMonitors = otherMonitors == null
                 ? new CapturedMonitorRow[0] : (CapturedMonitorRow[])otherMonitors.Clone();
             this.priorityOverrides = priorityOverrides == null
@@ -243,6 +251,9 @@ namespace TerminalOrganizer.App
 
         public CapturedMonitorRow[] OtherMonitors { get { return (CapturedMonitorRow[])otherMonitors.Clone(); } }
         public PriorityOverride[] PriorityOverrides { get { return (PriorityOverride[])priorityOverrides.Clone(); } }
+
+        /// <summary>The default rank applied to a window without a rule rank (0..999; an out-of-range value means 500).</summary>
+        public int DefaultRank { get { return defaultRank; } }
     }
 
     /// <summary>
@@ -302,6 +313,27 @@ namespace TerminalOrganizer.App
             PriorityOverride[] manualOverrides,
             MonitorKey organizedMonitorKey)
         {
+            return Compose(currentDesktopId, monitors, zonesPerMonitor, labelsPerMonitor, localPlans,
+                allWindows, facts, snapshots, manualOverrides, organizedMonitorKey, 500);
+        }
+
+        /// <summary>
+        /// SPEC-RULES-009: also takes the default rank of the caller's settings read, used for a window
+        /// without a rule outcome-supplied rank. The 9- and 10-parameter overloads mean default 500.
+        /// </summary>
+        public static CrossMonitorSnapshot Compose(
+            string currentDesktopId,
+            MonitorInfo[] monitors,
+            Zone[][] zonesPerMonitor,
+            string[] labelsPerMonitor,
+            AssignmentPlan[] localPlans,
+            EnumeratedWindow[] allWindows,
+            WindowFact[] facts,
+            WindowSnapshot[] snapshots,
+            PriorityOverride[] manualOverrides,
+            MonitorKey organizedMonitorKey,
+            int defaultRank)
+        {
             int monitorCount = MonitorRowCount(monitors, zonesPerMonitor, labelsPerMonitor, localPlans);
             List<MonitorLayoutSnapshot> layouts = new List<MonitorLayoutSnapshot>();
             List<AssignmentPlan> plans = new List<AssignmentPlan>();
@@ -343,7 +375,7 @@ namespace TerminalOrganizer.App
                 }
                 WindowSnapshot snapshot = FindSnapshot(snapshots, row.Handle);
                 windows.Add(BuildWindow(row, z, fact, snapshot, layouts[index], plans[index], manualOverrides,
-                    organizedMonitorKey));
+                    organizedMonitorKey, defaultRank));
             }
             return new CrossMonitorSnapshot(currentDesktopId, layouts.ToArray(), windows.ToArray());
         }
@@ -365,7 +397,7 @@ namespace TerminalOrganizer.App
 
         private static CrossMonitorWindow BuildWindow(EnumeratedWindow row, int zOrderIndex,
             WindowFact fact, WindowSnapshot snapshot, MonitorLayoutSnapshot layout,
-            AssignmentPlan plan, PriorityOverride[] manualOverrides, MonitorKey organizedMonitorKey)
+            AssignmentPlan plan, PriorityOverride[] manualOverrides, MonitorKey organizedMonitorKey, int defaultRank)
         {
             PlannedMove move = null;
             bool hasMove = plan != null && plan.TryFindMove(fact.Id, out move);
@@ -397,8 +429,7 @@ namespace TerminalOrganizer.App
             {
                 derivedClass = DerivedPriorityClass.StableOccupant;
             }
-            PriorityInput input = new PriorityInput(fact.Id,
-                ManualRank(manualOverrides, fact, snapshot), DeclaredRank(snapshot),
+            PriorityInput input = MakeInput(fact.Id, fact.Name, snapshot, manualOverrides, defaultRank,
                 derivedClass, manager, fact.FullScreen, stable,
                 zOrderIndex, layout.MonitorKey.CanonicalValue, fact.Top, fact.Left);
             ResolvedPriority priority = PriorityResolver.Resolve(input);
@@ -406,6 +437,43 @@ namespace TerminalOrganizer.App
                 layout.MonitorKey, verified, fact.MutationStateTrusted,
                 fact.FullScreen, manager, stable, overflow, currentZoneId,
                 fact.Left, fact.Top, fact.Width, fact.Height, priority);
+        }
+
+        // @MX:NOTE: snapshots without a rule outcome keep the title-parsed rank (C3 test world); the choice is the presence flag alone.
+        private static PriorityInput MakeInput(string windowId, string windowName, WindowSnapshot snapshot,
+            PriorityOverride[] manualOverrides, int defaultRank, DerivedPriorityClass derivedClass, bool manager,
+            bool fullScreen, bool stable, int zOrderIndex, string monitorKey, int top, int left)
+        {
+            int? manual = ManualRank(manualOverrides, windowName, snapshot);
+            if (snapshot != null && snapshot.HasRuleOutcome)
+            {
+                return new PriorityInput(windowId, manual, snapshot.RuleRank, snapshot.RuleReference, defaultRank,
+                    derivedClass, manager, fullScreen, stable, zOrderIndex, monitorKey, top, left);
+            }
+            return new PriorityInput(windowId, manual, DeclaredRank(snapshot),
+                derivedClass, manager, fullScreen, stable, zOrderIndex, monitorKey, top, left);
+        }
+
+        /// <summary>
+        /// The priority a window would carry on the movable path: the same inputs redistribution resolves
+        /// (manual rows, rule outcome, default rank, session-class or label step) with the manager, full-screen
+        /// and stable-occupant flags off. The menu rows and the tool lines read this, so for every movable
+        /// window the shown rank and provenance equal the rank redistribution uses (SPEC-RULES-009 REQ-PRI-001).
+        /// </summary>
+        internal static ResolvedPriority ResolveMovable(WindowSnapshot snapshot, PriorityOverride[] manualOverrides, int defaultRank)
+        {
+            if (snapshot == null)
+            {
+                return null;
+            }
+            string name = snapshot.Identity == null ? null : snapshot.Identity.RawWindowTitle;
+            if (string.IsNullOrEmpty(name) && snapshot.Tabs.Length > 0 && snapshot.Tabs[0] != null)
+            {
+                name = snapshot.Tabs[0].Title;
+            }
+            PriorityInput input = MakeInput("display", name, snapshot, manualOverrides, defaultRank,
+                DerivedClass(snapshot), false, false, false, 0, string.Empty, 0, 0);
+            return PriorityResolver.Resolve(input);
         }
 
         /// <summary>The session-derived class; unidentified windows are Unidentified.</summary>
@@ -461,11 +529,12 @@ namespace TerminalOrganizer.App
 
         /// <summary>
         /// The first matching manual override (canonical settings order): a Session row
-        /// matches any tab session name, a RawTitle row matches the window name. UserLabel
+        /// matches any tab session name, a RawTitle row matches the window name, an Identity
+        /// row matches the snapshot identity name. UserLabel
         /// rows need the run-scoped label registry, which the tools do not carry — those
         /// rows match nothing here and C3's Prepare carries the labels.
         /// </summary>
-        private static int? ManualRank(PriorityOverride[] overrides, WindowFact fact, WindowSnapshot snapshot)
+        private static int? ManualRank(PriorityOverride[] overrides, string windowName, WindowSnapshot snapshot)
         {
             foreach (PriorityOverride row in overrides ?? new PriorityOverride[0])
             {
@@ -486,8 +555,13 @@ namespace TerminalOrganizer.App
                         }
                     }
                 }
-                else if (row.Selector.Kind == ManagerSelectorKind.RawTitle && fact != null
-                    && string.Equals(fact.Name, row.Selector.Value, StringComparison.Ordinal))
+                else if (row.Selector.Kind == ManagerSelectorKind.RawTitle && windowName != null
+                    && string.Equals(windowName, row.Selector.Value, StringComparison.Ordinal))
+                {
+                    matches = true;
+                }
+                else if (row.Selector.Kind == ManagerSelectorKind.Identity && snapshot != null
+                    && string.Equals(snapshot.IdentityName, row.Selector.Value, StringComparison.Ordinal))
                 {
                     matches = true;
                 }
@@ -805,11 +879,22 @@ namespace TerminalOrganizer.App
         public OrganizeRunResult Run(MonitorInfo monitor, string managerWindowName, bool mergeEnabled,
             string monitorLabel, string logPath, CancellationToken cancellationToken)
         {
+            return Run(monitor, managerWindowName, mergeEnabled, monitorLabel, logPath, cancellationToken, null);
+        }
+
+        /// <summary>
+        /// SPEC-RULES-009 REQ-ID-004: the same run, with the persisted manager selector. The run resolves the
+        /// selector against its own discovered windows like the menu does and pins the resolved window; the
+        /// string parameter stays the raw-title fallback used when the status is anything other than Resolved.
+        /// </summary>
+        public OrganizeRunResult Run(MonitorInfo monitor, string managerWindowName, bool mergeEnabled,
+            string monitorLabel, string logPath, CancellationToken cancellationToken, ManagerSelector managerSelector)
+        {
             DateTime startedUtc = DateTime.UtcNow;
             try
             {
                 PreparedOrganizeRun prepared = PrepareCore(monitor, managerWindowName, mergeEnabled,
-                    monitorLabel, logPath, null, startedUtc, cancellationToken);
+                    monitorLabel, logPath, null, startedUtc, cancellationToken, managerSelector);
                 // Compatibility overload (C3): pure planning plus a HEADLESS commit —
                 // never any UI. The legacy mergeEnabled flag selects Merge vs Stack so
                 // the pinned headless sequences (AC-006..008, B5 organize-once) keep
@@ -834,7 +919,7 @@ namespace TerminalOrganizer.App
             string monitorLabel, string logPath, OrganizeRequest request, CancellationToken cancellationToken)
         {
             return PrepareCore(monitor, managerWindowName, mergeEnabled, monitorLabel, logPath, request,
-                DateTime.UtcNow, cancellationToken);
+                DateTime.UtcNow, cancellationToken, null);
         }
 
         /// <summary>
@@ -863,11 +948,21 @@ namespace TerminalOrganizer.App
             OverflowChoicePrompt choicePrompt, Action<OverflowPolicy> persistChoice,
             CancellationToken cancellationToken)
         {
+            return RunWithChoice(monitor, managerWindowName, monitorLabel, logPath, savedPolicy, mergeReleaseGate,
+                choicePrompt, persistChoice, cancellationToken, null);
+        }
+
+        /// <summary>SPEC-RULES-009 REQ-ID-004: the choice flow with the persisted manager selector (see the 7-parameter Run).</summary>
+        public OrganizeRunResult RunWithChoice(MonitorInfo monitor, string managerWindowName,
+            string monitorLabel, string logPath, OverflowPolicy savedPolicy, bool mergeReleaseGate,
+            OverflowChoicePrompt choicePrompt, Action<OverflowPolicy> persistChoice,
+            CancellationToken cancellationToken, ManagerSelector managerSelector)
+        {
             DateTime startedUtc = DateTime.UtcNow;
             try
             {
                 PreparedOrganizeRun prepared = PrepareCore(monitor, managerWindowName, mergeReleaseGate,
-                    monitorLabel, logPath, null, startedUtc, cancellationToken);
+                    monitorLabel, logPath, null, startedUtc, cancellationToken, managerSelector);
                 TraceLine("overflow-flow:prepare");
                 if (prepared.Plan == null)
                 {
@@ -973,7 +1068,7 @@ namespace TerminalOrganizer.App
         /// </summary>
         private PreparedOrganizeRun PrepareCore(MonitorInfo monitor, string managerWindowName,
             bool mergeEnabled, string monitorLabel, string logPath, OrganizeRequest request,
-            DateTime startedUtc, CancellationToken cancellationToken)
+            DateTime startedUtc, CancellationToken cancellationToken, ManagerSelector managerSelector)
         {
             string label = ResolveMonitorLabel(monitor, monitorLabel);
             List<MergeOutcome> outcomes = new List<MergeOutcome>();
@@ -1047,6 +1142,8 @@ namespace TerminalOrganizer.App
                     monitor, desktop, layout, managerWindowName, label, logPath, startedUtc,
                     commitGuard, mergeEnabled, null, facts, snapshots);
             }
+            // @MX:NOTE: the run resolves the selector like the menu; the string port receives the resolved name (SPEC-RULES-009 REQ-ID-004).
+            managerWindowName = ResolveManagerName(managerSelector, managerWindowName, facts, snapshots);
             AssignmentPlan initial = assign(zones, facts, managerWindowName);
             EmitManagerNotice(initial, managerWindowName, label);
 
@@ -1060,6 +1157,7 @@ namespace TerminalOrganizer.App
             // organizing still runs.
             CapturedMonitorRow[] worldRows = new CapturedMonitorRow[0];
             PriorityOverride[] overrides = new PriorityOverride[0];
+            int defaultRank = 500;
             if (worldCapture != null)
             {
                 try
@@ -1069,6 +1167,7 @@ namespace TerminalOrganizer.App
                     {
                         worldRows = world.OtherMonitors;
                         overrides = world.PriorityOverrides;
+                        defaultRank = world.DefaultRank;
                     }
                 }
                 catch (Exception ex)
@@ -1125,7 +1224,7 @@ namespace TerminalOrganizer.App
                 }
                 CrossMonitorSnapshot composed = CrossMonitorSnapshotComposer.Compose(desktop, rowMonitors,
                     rowZones, rowLabels, rowPlans, allWindows.ToArray(), allFacts.ToArray(),
-                    allSnapshots.ToArray(), overrides, monitor.StableKey);
+                    allSnapshots.ToArray(), overrides, monitor.StableKey, defaultRank);
                 redistribution = CrossMonitorPlanner.Plan(composed);
             }
 
@@ -1136,6 +1235,34 @@ namespace TerminalOrganizer.App
             return new PreparedOrganizeRun(request, plan, discovered, preliminary, null,
                 monitor, desktop, layout, managerWindowName, label, logPath, startedUtc,
                 commitGuard, mergeEnabled, rows, allFacts.ToArray(), allSnapshots.ToArray());
+        }
+
+        /// <summary>
+        /// The manager name the unchanged string assignment port receives: the current raw name of the window the
+        /// selector resolves to, or the caller's raw-title fallback when there is no selector or the resolution
+        /// status is anything other than Resolved (today's matching, today's skip reasons).
+        /// </summary>
+        private static string ResolveManagerName(ManagerSelector selector, string fallbackName,
+            WindowFact[] facts, WindowSnapshot[] snapshots)
+        {
+            if (selector == null || selector.IsEmpty)
+            {
+                return fallbackName;
+            }
+            ManagerResolution resolution = ManagerResolver.Resolve(selector, facts, snapshots);
+            if (resolution.Status != ManagerResolutionStatus.Resolved)
+            {
+                return fallbackName;
+            }
+            foreach (WindowFact fact in facts)
+            {
+                if (fact != null && string.Equals(fact.Id, resolution.WindowId, StringComparison.Ordinal)
+                    && !string.IsNullOrEmpty(fact.Name))
+                {
+                    return fact.Name;
+                }
+            }
+            return fallbackName;
         }
 
         /// <summary>

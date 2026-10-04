@@ -80,6 +80,19 @@ function Invoke-Assign($Zones, $Facts, [string]$ManagerName) {
     [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($Zones, $Facts, $ManagerName)
 }
 
+# SPEC-RULES-009 REQ-ID-004: the local plan pins what the organize run pins - the selector is resolved
+# against the discovered windows (the same resolution the menu uses) and the ZoneAssigner resolution
+# overload receives it; any status other than Resolved falls back to raw-title matching (today's reasons).
+function Invoke-ManagerAssign($Zones, $Facts, $Snapshots, $Selector) {
+    $resolution = [TerminalOrganizer.Core.Assignment.ManagerResolver]::Resolve($Selector, [TerminalOrganizer.Core.Assignment.WindowFact[]]@($Facts), [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($Snapshots))
+    if ($resolution.Status.ToString() -eq 'Resolved') {
+        return [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($Zones, [TerminalOrganizer.Core.Assignment.WindowFact[]]@($Facts), $resolution)
+    }
+    $fallback = $null
+    if (-not $Selector.IsEmpty) { $fallback = $Selector.RawTitleFallback }
+    Invoke-Assign $Zones $Facts $fallback
+}
+
 function Get-Move($Plan, [string]$WindowId) {
     @($Plan.Moves | Where-Object { $_.WindowId -eq $WindowId })[0]
 }
@@ -196,6 +209,91 @@ if ($SelfTest) {
         $b5Facts.Length -eq 1 -and $b5Plan.Moves.Count -eq 1 -and $b5Plan.Moves[0].WindowId -ceq 'B5W4201'
     Assert-Check 'b5/no-cross-monitor-facts' $b5Ok 'monitor 1 scopes to window 4201 only and plans exactly one move'
 
+    # --- SPEC-RULES-009 AC-011 rows: rule-set composition and the shared provenance formatter ---
+    # The preset-none fixture of plan.md J.3 (rule list U, default rank 450) goes through the same single
+    # settings read, rule-set composition and identity-name facts the live path uses.
+    $ac11Dot = ' ' + [char]0x00B7 + ' '
+    $ac11ListU = '{"match":"PowerShell*","rank":200},{"match":"regex:^ssh (?<name>[^ ]+)","rank":400},{"match":"regex:^(?<rank>[0-9]{1,4})-(?<name>.+)$"},{"marker":"#"},{"match":"*--attach YODA*","on":"commandline","rank":250}'
+    $ac11Json = '{"hotkey":"Ctrl+Alt+O","schemaVersion":3,"titleRules":{"preset":"none","defaultRank":450,"rules":[' + $ac11ListU + ']}}'
+    $ac11File = Join-Path ([IO.Path]::GetTempPath()) ('ac11-' + [guid]::NewGuid().ToString('N') + '.json')
+    [IO.File]::WriteAllText($ac11File, $ac11Json)
+    try { $ac11Settings = [TerminalOrganizer.App.SettingsStore]::new($ac11File).Load() }
+    finally { Remove-Item -LiteralPath $ac11File -Force -ErrorAction SilentlyContinue }
+
+    $ac11WorkArea = New-Object TerminalOrganizer.Core.Geometry.WorkArea -ArgumentList 0, 0, 1920, 1152, 96
+    $ac11Mon1 = New-Object TerminalOrganizer.Core.Monitors.MonitorInfo -ArgumentList `
+        '\\?\DISPLAY#DELA0C1#ac11inst1', 'DELA0C1', 'ac11inst1', 'AC11A', 1, 0, 0, 1920, 1200, $ac11WorkArea
+    $ac11Mon2 = New-Object TerminalOrganizer.Core.Monitors.MonitorInfo -ArgumentList `
+        '\\?\DISPLAY#DELA0C1#ac11inst2', 'DELA0C1', 'ac11inst2', 'AC11B', 2, 1920, 0, 1920, 1200, $ac11WorkArea
+    $ac11Current = [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true)
+    $ac11Cmd = 'wsl.exe -d Ubuntu --exec /home/dev/run_dev_launch.sh --attach YODA1'
+    $ac11Session = New-Object TerminalOrganizer.Core.Windows.SessionRecord -ArgumentList 'YODA1', ([TerminalOrganizer.Core.Windows.SessionKind]::Local), $ac11Cmd
+
+    function New-Ac11Acquired([long]$Handle, [string]$Title) {
+        $identity = [TerminalOrganizer.Core.Windows.WindowIdentity]::new([IntPtr]$Handle, 42, 12345, 'CASCADIA_HOSTING_WINDOW_CLASS', $Title)
+        [TerminalOrganizer.Core.Windows.AcquiredWindow]::new($identity,
+            [TerminalOrganizer.Core.Windows.TabTitleResult]::Ok([string[]]@($Title)), $ac11Mon1, $ac11Current)
+    }
+
+    # Line check: W-PS, W-L, W-SSH composed through the rule-set overload; every per-window line equals two
+    # spaces, 'window: ' and the menu row text; facts are built from identity names.
+    $ac11Snaps = [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose(
+        [TerminalOrganizer.Core.Windows.AcquiredWindow[]]@((New-Ac11Acquired 9001 'powershell'), (New-Ac11Acquired 9002 'OC_YODA1'), (New-Ac11Acquired 9003 'ssh server1')),
+        [TerminalOrganizer.Core.Windows.SessionRecord[]]@($ac11Session), $ac11Settings.TitleRules.RuleSet)
+    $ac11NamedAll = $true
+    foreach ($ac11Snap in $ac11Snaps) {
+        if (-not [TerminalOrganizer.Core.Assignment.ManagerResolver]::HasIdentityName($ac11Snap)) { $ac11NamedAll = $false }
+    }
+    $ac11Overrides = [TerminalOrganizer.App.PriorityOverride[]]@($ac11Settings.PriorityOverrides)
+    $ac11Rank = [int]$ac11Settings.TitleRules.DefaultRank
+    $ac11Lines = [TerminalOrganizer.App.RuleProvenance]::LineTexts($ac11Snaps, $ac11Overrides, $ac11Rank)
+    $ac11Texts = [TerminalOrganizer.App.RuleProvenance]::RowTexts($ac11Snaps, $ac11Overrides, $ac11Rank)
+    $ac11State = [TerminalOrganizer.App.TrayMenuState]::new($false, 'Ctrl+Alt+O',
+        [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($ac11Mon1), $ac11Snaps,
+        [TerminalOrganizer.Core.Assignment.ManagerSelector]::None(), $null, $null, $false,
+        [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Ask'), [string[]]@($ac11Texts))
+    $ac11Root = @([TerminalOrganizer.App.TrayMenuBuilder]::Build($ac11State) | Where-Object { $_.Kind.ToString() -eq 'LabelsAndPrioritiesRoot' })[0]
+    $ac11LinesOk = $ac11NamedAll -and $ac11Lines.Length -eq 3 -and @($ac11Root.Children).Count -eq 3
+    for ($ac11I = 0; $ac11LinesOk -and $ac11I -lt 3; $ac11I++) {
+        if ($ac11Lines[$ac11I] -cne ('  window: ' + $ac11Root.Children[$ac11I].Label)) { $ac11LinesOk = $false }
+    }
+    $ac11WlLine = '  window: OC_YODA1' + $ac11Dot + 'rank 250' + $ac11Dot + 'rule 5: *--attach YODA*'
+    $ac11LinesOk = $ac11LinesOk -and $ac11Lines[1] -ceq $ac11WlLine
+    Assert-Check 'ac011/lines' $ac11LinesOk 'every line equals two spaces, window: and the menu row text; W-L reads OC_YODA1 / rank 250 / rule 5'
+
+    # Preview check: the one-overflow fixture with the loaded default rank 450; the single planned move is
+    # Untitled tab and carries 'derived rank 450'.
+    $ac11Handles = @(9101, 9102, 9103, 9104)
+    $ac11Titles = @('OC_YODA1', 'powershell', 'ssh server1', 'Untitled tab')
+    $ac11Rects = @(@(0, 0, 960, 1040), @(100, 500, 400, 300), @(100, 600, 400, 300), @(100, 700, 400, 300))
+    $ac11Acq = @()
+    for ($ac11I = 0; $ac11I -lt 4; $ac11I++) { $ac11Acq += , (New-Ac11Acquired $ac11Handles[$ac11I] $ac11Titles[$ac11I]) }
+    $ac11PSnaps = [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose(
+        [TerminalOrganizer.Core.Windows.AcquiredWindow[]]$ac11Acq,
+        [TerminalOrganizer.Core.Windows.SessionRecord[]]@($ac11Session), $ac11Settings.TitleRules.RuleSet)
+    $ac11PFacts = @()
+    $ac11PRows = New-Object 'System.Collections.Generic.List[TerminalOrganizer.Core.Windows.EnumeratedWindow]'
+    for ($ac11I = 0; $ac11I -lt 4; $ac11I++) {
+        $ac11PFacts += , [TerminalOrganizer.Core.Assignment.WindowFact]::new(('ac11-' + $ac11I), [IntPtr]$ac11Handles[$ac11I], $ac11Titles[$ac11I],
+            [TerminalOrganizer.Core.Assignment.ManagerResolver]::HasIdentityName($ac11PSnaps[$ac11I]),
+            $ac11Rects[$ac11I][0], $ac11Rects[$ac11I][1], $ac11Rects[$ac11I][2], $ac11Rects[$ac11I][3], $false, $false, $false)
+        $ac11PRows.Add([TerminalOrganizer.Core.Windows.EnumeratedWindow]::new([IntPtr]$ac11Handles[$ac11I], $ac11Mon1, $ac11Current, $ac11PSnaps[$ac11I].Identity))
+    }
+    $ac11Z1 = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 0, 0, 960, 1040))
+    $ac11Z2 = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 1920, 0, 960, 1040))
+    $ac11Plan1 = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($ac11Z1, [TerminalOrganizer.Core.Assignment.WindowFact[]]$ac11PFacts, $null)
+    $ac11Plan2 = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($ac11Z2, [TerminalOrganizer.Core.Assignment.WindowFact[]]@(), $null)
+    $ac11ZoneSets = New-Object 'TerminalOrganizer.Core.Geometry.Zone[][]' 2
+    $ac11ZoneSets[0] = $ac11Z1
+    $ac11ZoneSets[1] = $ac11Z2
+    $ac11Composed = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose('ac11-desktop',
+        [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($ac11Mon1, $ac11Mon2), $ac11ZoneSets, [string[]]@('M1', 'M2'),
+        [TerminalOrganizer.Core.Assignment.AssignmentPlan[]]@($ac11Plan1, $ac11Plan2), $ac11PRows.ToArray(),
+        [TerminalOrganizer.Core.Assignment.WindowFact[]]$ac11PFacts, $ac11PSnaps, $ac11Overrides, $ac11Mon1.StableKey, $ac11Rank)
+    $ac11Move = [TerminalOrganizer.Core.Overflow.CrossMonitorPlanner]::Plan($ac11Composed)
+    $ac11PreviewOk = @($ac11Move.Moves).Count -eq 1 -and $ac11Move.Moves[0].WindowId -ceq 'ac11-3' -and $ac11Move.Moves[0].PriorityReason -ceq 'derived rank 450'
+    Assert-Check 'ac011/preview' $ac11PreviewOk 'one planned move for Untitled tab carrying derived rank 450'
+
     Write-Output ('SelfTest summary: ' + $script:CheckCount + ' checks, ' + $script:FailCount + ' failed')
     if ($script:FailCount -gt 0) { exit 1 }
     exit 0
@@ -252,8 +350,11 @@ try {
         Fail-Dry ('applied-layouts document invalid: ' + $appliedDoc.Detail) 3
     }
 
-    $store = New-Object TerminalOrganizer.Core.Assignment.ManagerStore -ArgumentList $SettingsPath
-    $managerName = $store.Load()
+    # SPEC-RULES-009 REQ-UI-002: ONE settings read, before any window is composed. It supplies the manager
+    # selector, the manual overrides, the rule set and the default rank for every site below.
+    $settings = [TerminalOrganizer.App.SettingsStore]::new($SettingsPath).Load()
+    $selector = $settings.ManagerSelector
+    $managerName = $settings.ManagerWindowName
     Write-Output ('dry run: manager choice from ' + $SettingsPath + ': ' + $(if ($null -ne $managerName) { $managerName } else { '<no choice>' }))
 
     $wtProcs = @([System.Diagnostics.Process]::GetProcessesByName('WindowsTerminal'))
@@ -303,7 +404,7 @@ try {
             $titles = $titleReader.ReadTabs($w.Handle)
             $acquired += , (New-Object TerminalOrganizer.Core.Windows.AcquiredWindow -ArgumentList $w.Handle, $titles, $w.Monitor, $w.DesktopStatus)
         }
-        $snapshots = [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose($acquired, $sessions)
+        $snapshots = [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose($acquired, $sessions, $settings.TitleRules.RuleSet)
 
         $facts = @()
         foreach ($snap in $snapshots) {
@@ -311,12 +412,12 @@ try {
             $name = [TerminalOrganizer.Core.Windows.UiaTabTitleReader]::GetWindowTextTitle($snap.Handle)
             if ([string]::IsNullOrEmpty($name) -and $snap.Tabs.Length -gt 0) { $name = $snap.Tabs[0].Title }
             $facts += , [TerminalOrganizer.Core.Assignment.WindowFact]::new(
-                ('w' + $snap.Handle), $snap.Handle, $name, $snap.Identified,
+                ('w' + $snap.Handle), $snap.Handle, $name, [TerminalOrganizer.Core.Assignment.ManagerResolver]::HasIdentityName($snap),
                 $state.Left, $state.Top, $state.Width, $state.Height,
                 $state.Maximized, $state.Minimized, $state.FullScreen)
         }
 
-        $plan = Invoke-Assign $zones $facts $managerName
+        $plan = Invoke-ManagerAssign $zones $facts $snapshots $selector
         if ($plan.ManagerPinned) {
             Write-Output ('  plan: manager pinned: ' + $plan.ManagerWindowId)
         }
@@ -328,6 +429,11 @@ try {
         }
         if ($facts.Length -eq 0) {
             Write-Output ('  dry run: no windows in scope on monitor #' + $target.Number + ' (valid empty result)')
+        }
+        # SPEC-RULES-009 REQ-UI-002: one line per window, the same text the tray menu rows show (shared formatter).
+        foreach ($providerLine in [TerminalOrganizer.App.RuleProvenance]::LineTexts([TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($snapshots),
+                [TerminalOrganizer.App.PriorityOverride[]]@($settings.PriorityOverrides), [int]$settings.TitleRules.DefaultRank)) {
+            Write-Output $providerLine
         }
 
         $cmMonitors.Add($target)
@@ -341,12 +447,7 @@ try {
     # C2: the pure cross-monitor redistribution preview over the planned monitors. The
     # dry run never mutates anything - this plan is computed, printed, and never applied.
     if ($cmMonitors.Count -gt 0) {
-        $cmOverrides = @()
-        try {
-            $cmStore = New-Object TerminalOrganizer.App.SettingsStore -ArgumentList $SettingsPath
-            $cmOverrides = $cmStore.Load().PriorityOverrides
-        }
-        catch { $cmOverrides = @() }
+        $cmOverrides = $settings.PriorityOverrides
         # Sources are only the organized monitor's own overflow; -AllMonitors organizes
         # every monitor, so the null key keeps every monitor's overflow as a source.
         $cmOrganizedKey = $null
@@ -354,7 +455,7 @@ try {
         $cmSnapshot = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose(
             $desktopText, $cmMonitors.ToArray(), $cmZones.ToArray(), $cmLabels.ToArray(),
             $cmPlans.ToArray(), $windows, $cmFacts.ToArray(), $cmSnaps.ToArray(),
-            [TerminalOrganizer.App.PriorityOverride[]]@($cmOverrides), $cmOrganizedKey)
+            [TerminalOrganizer.App.PriorityOverride[]]@($cmOverrides), $cmOrganizedKey, [int]$settings.TitleRules.DefaultRank)
         $cmPlan = [TerminalOrganizer.Core.Overflow.CrossMonitorPlanner]::Plan($cmSnapshot)
         Write-Output ('dry run: redistribute planned=' + $cmPlan.Moves.Length + ' applied=0 (pure plan; C3 selects policy)')
         foreach ($cmMove in $cmPlan.Moves) {

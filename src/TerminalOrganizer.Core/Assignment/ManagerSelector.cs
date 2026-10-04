@@ -14,7 +14,11 @@ namespace TerminalOrganizer.Core.Assignment
         None,
         Session,
         UserLabel,
-        RawTitle
+        RawTitle,
+
+        // @MX:NOTE: appended last on purpose (override order); identity follows the title (SPEC-RULES-009 REQ-ID-003).
+        /// <summary>A window's identity name after title rules (SPEC-RULES-009); follows the title, not the process.</summary>
+        Identity
     }
 
     /// <summary>
@@ -137,7 +141,8 @@ namespace TerminalOrganizer.Core.Assignment
     /// <summary>
     /// Creates and resolves canonical manager selectors (B2). Pure: no Win32 calls; the
     /// inputs are discovery outputs joined by handle. Creation prefers the single
-    /// canonical session, then a run-scoped user label, then the raw title; resolution
+    /// canonical session, then a run-scoped user label, then the identity name (SPEC-RULES-009),
+    /// then the raw title; resolution
     /// NEVER takes a first match — more than one matching window is Ambiguous.
     /// </summary>
     public static class ManagerResolver
@@ -165,7 +170,21 @@ namespace TerminalOrganizer.Core.Assignment
             {
                 return new ManagerSelector(ManagerSelectorKind.UserLabel, userLabel, rawTitle);
             }
+            if (!string.IsNullOrEmpty(snapshot.IdentityName))
+            {
+                return new ManagerSelector(ManagerSelectorKind.Identity, snapshot.IdentityName, rawTitle);
+            }
             return new ManagerSelector(ManagerSelectorKind.RawTitle, rawTitle, rawTitle);
+        }
+
+        /// <summary>
+        /// True when the window has an identity name (SPEC-RULES-009 REQ-ID-001): the rule-derived name, or,
+        /// for a snapshot built before title rules existed, the old session-evidence flag. A window without
+        /// either keeps the "window unidentified" outcome. Merge eligibility never reads this.
+        /// </summary>
+        public static bool HasIdentityName(WindowSnapshot snapshot)
+        {
+            return snapshot != null && (snapshot.Identified || !string.IsNullOrEmpty(snapshot.IdentityName));
         }
 
         /// <summary>
@@ -197,7 +216,7 @@ namespace TerminalOrganizer.Core.Assignment
                     matches.Count, "ambiguous manager name");
             }
             WindowPair match = matches[0];
-            if (match.Snapshot == null || !match.Snapshot.Identified)
+            if (match.Snapshot == null || !HasIdentityName(match.Snapshot))
             {
                 return new ManagerResolution(ManagerResolutionStatus.Unidentified, null, IntPtr.Zero, 1, "window unidentified");
             }
@@ -305,6 +324,10 @@ namespace TerminalOrganizer.Core.Assignment
             if (kind == ManagerSelectorKind.UserLabel)
             {
                 return snapshot != null && string.Equals(DeriveUserLabel(snapshot), value, StringComparison.Ordinal);
+            }
+            if (kind == ManagerSelectorKind.Identity)
+            {
+                return snapshot != null && string.Equals(snapshot.IdentityName, value, StringComparison.Ordinal);
             }
             return fact != null && string.Equals(fact.Name, value, StringComparison.Ordinal);
         }

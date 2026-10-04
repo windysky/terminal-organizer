@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using TerminalOrganizer.Core.Assignment;
 using TerminalOrganizer.Core.Monitors;
 using TerminalOrganizer.Core.Overflow;
+using TerminalOrganizer.Core.Rules;
 using TerminalOrganizer.Core.Windows;
 
 namespace TerminalOrganizer.App
@@ -15,6 +16,25 @@ namespace TerminalOrganizer.App
         public static DiscoveredWindows Acquire(EnumeratedWindow[] windows, MonitorInfo monitor,
             Func<IntPtr, WindowState> readState, TabTitleRead readTabs, SessionRecordsRead readSessions,
             Func<WindowSnapshot[], WindowSnapshot[]> overlay)
+        {
+            return AcquireCore(windows, monitor, readState, readTabs, readSessions, overlay, null, false);
+        }
+
+        /// <summary>
+        /// SPEC-RULES-009: composes through the rule-set overload with the rule set of the caller's own settings
+        /// read, and builds each window fact with "has identity name" (a rule-derived or session name) instead of
+        /// session evidence alone. The 6-parameter overload above keeps today's behaviour.
+        /// </summary>
+        public static DiscoveredWindows Acquire(EnumeratedWindow[] windows, MonitorInfo monitor,
+            Func<IntPtr, WindowState> readState, TabTitleRead readTabs, SessionRecordsRead readSessions,
+            Func<WindowSnapshot[], WindowSnapshot[]> overlay, RuleSet rules)
+        {
+            return AcquireCore(windows, monitor, readState, readTabs, readSessions, overlay, rules, true);
+        }
+
+        private static DiscoveredWindows AcquireCore(EnumeratedWindow[] windows, MonitorInfo monitor,
+            Func<IntPtr, WindowState> readState, TabTitleRead readTabs, SessionRecordsRead readSessions,
+            Func<WindowSnapshot[], WindowSnapshot[]> overlay, RuleSet rules, bool identityFacts)
         {
             List<AcquiredWindow> acquired = new List<AcquiredWindow>();
             Dictionary<long, WindowState> states = new Dictionary<long, WindowState>();
@@ -48,7 +68,9 @@ namespace TerminalOrganizer.App
             pids.CopyTo(processIds);
             Array.Sort(processIds);
             SessionRecord[] sessions = processIds.Length == 0 ? new SessionRecord[0] : readSessions(processIds);
-            WindowSnapshot[] snapshots = WindowSnapshotBuilder.Compose(acquired.ToArray(), sessions);
+            WindowSnapshot[] snapshots = identityFacts
+                ? WindowSnapshotBuilder.Compose(acquired.ToArray(), sessions, rules)
+                : WindowSnapshotBuilder.Compose(acquired.ToArray(), sessions);
             if (overlay != null) snapshots = overlay(snapshots);
             List<WindowFact> facts = new List<WindowFact>();
             foreach (WindowSnapshot snapshot in snapshots)
@@ -57,7 +79,8 @@ namespace TerminalOrganizer.App
                 if (!states.TryGetValue(snapshot.Handle.ToInt64(), out state)) continue;
                 string name = snapshot.Identity == null ? null : snapshot.Identity.RawWindowTitle;
                 if (string.IsNullOrEmpty(name) && snapshot.Tabs.Length > 0) name = snapshot.Tabs[0].Title;
-                facts.Add(new WindowFact("w" + snapshot.Handle, snapshot.Handle, name, snapshot.Identified,
+                bool named = identityFacts ? ManagerResolver.HasIdentityName(snapshot) : snapshot.Identified;
+                facts.Add(new WindowFact("w" + snapshot.Handle, snapshot.Handle, name, named,
                     state.Left, state.Top, state.Width, state.Height, state.Maximized, state.Minimized, state.FullScreen, state.IsValidForMutation));
             }
             return new DiscoveredWindows(facts.ToArray(), snapshots, enumerated, other, unknown, invalid);

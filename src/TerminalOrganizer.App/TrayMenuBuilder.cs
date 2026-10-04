@@ -157,6 +157,7 @@ namespace TerminalOrganizer.App
         private readonly string lastResultText;
         private readonly bool mergeMenuEnabled;
         private readonly OverflowPolicy overflowPolicy;
+        private readonly Dictionary<long, string> rowTexts;
 
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
             ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText, bool mergeMenuEnabled)
@@ -170,7 +171,32 @@ namespace TerminalOrganizer.App
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
             ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
             bool mergeMenuEnabled, OverflowPolicy overflowPolicy)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, null)
         {
+        }
+
+        /// <summary>
+        /// SPEC-RULES-009 form: also carries one priority row text per window, parallel to the windows array
+        /// (RuleProvenance.RowTexts). With row texts, "Labels and priorities" lists every window; without them
+        /// (the older constructors) it keeps listing only unidentified windows.
+        /// </summary>
+        public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts)
+        {
+            if (windowRowTexts != null)
+            {
+                this.rowTexts = new Dictionary<long, string>();
+                WindowSnapshot[] given = windows ?? new WindowSnapshot[0];
+                for (int i = 0; i < given.Length && i < windowRowTexts.Length; i++)
+                {
+                    if (given[i] != null)
+                    {
+                        this.rowTexts[given[i].Handle.ToInt64()] = windowRowTexts[i];
+                    }
+                }
+            }
             this.busy = busy;
             this.hotkeyDisplay = hotkeyDisplay;
             this.monitors = monitors == null ? new MonitorInfo[0] : (MonitorInfo[])monitors.Clone();
@@ -193,6 +219,20 @@ namespace TerminalOrganizer.App
 
         /// <summary>The persisted overflow policy (C3); Ask on the legacy constructor.</summary>
         public OverflowPolicy OverflowPolicy { get { return overflowPolicy; } }
+
+        /// <summary>True when the state carries priority row texts (the SPEC-RULES-009 constructor).</summary>
+        public bool HasRowTexts { get { return rowTexts != null; } }
+
+        /// <summary>The row text of one window by handle; null when the state carries none for it.</summary>
+        public string RowTextFor(WindowSnapshot window)
+        {
+            string text;
+            if (rowTexts == null || window == null || !rowTexts.TryGetValue(window.Handle.ToInt64(), out text))
+            {
+                return null;
+            }
+            return text;
+        }
     }
 
     /// <summary>
@@ -245,7 +285,7 @@ namespace TerminalOrganizer.App
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.OverflowRoot, "Overflow behavior", !busy, false, null, null, null,
                 BuildOverflowChildren(state.OverflowPolicy)));
             entries.Add(Separator());
-            TrayMenuEntry[] labelRows = BuildLabelChildren(snapshots);
+            TrayMenuEntry[] labelRows = BuildLabelChildren(snapshots, state);
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.LabelsAndPrioritiesRoot, "Labels and priorities",
                 labelRows.Length > 0 && !busy, false, null, null, null, labelRows));
             entries.Add(Separator());
@@ -509,9 +549,23 @@ namespace TerminalOrganizer.App
             };
         }
 
-        private static TrayMenuEntry[] BuildLabelChildren(List<WindowSnapshot> snapshots)
+        private static TrayMenuEntry[] BuildLabelChildren(List<WindowSnapshot> snapshots, TrayMenuState state)
         {
             List<TrayMenuEntry> rows = new List<TrayMenuEntry>();
+            if (state != null && state.HasRowTexts)
+            {
+                // SPEC-RULES-009 REQ-UI-001: every discovered window, one row of rank and provenance text. A window
+                // with canonical session evidence is informational (disabled); every other row keeps the label
+                // action, which prompts with the plain display text carried in Value.
+                foreach (WindowSnapshot snapshot in snapshots)
+                {
+                    string text = state.RowTextFor(snapshot) ?? DisplayWindowCandidate(snapshot);
+                    rows.Add(new TrayMenuEntry(TrayMenuEntryKind.LabelWindow, text,
+                        !RuleProvenance.HasCanonicalSessionEvidence(snapshot), false, null,
+                        new WindowMenuKey(snapshot.Identity), DisplayWindowCandidate(snapshot), null));
+                }
+                return rows.ToArray();
+            }
             foreach (WindowSnapshot snapshot in snapshots)
             {
                 if (snapshot != null && !snapshot.Identified)
@@ -654,7 +708,7 @@ namespace TerminalOrganizer.App
             List<WindowSnapshot> candidates = new List<WindowSnapshot>();
             foreach (WindowSnapshot snapshot in snapshots)
             {
-                if (snapshot.Identified)
+                if (ManagerResolver.HasIdentityName(snapshot))
                 {
                     candidates.Add(snapshot);
                 }

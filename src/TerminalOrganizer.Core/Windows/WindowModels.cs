@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using TerminalOrganizer.Core.Monitors;
+using TerminalOrganizer.Core.Rules;
 
 namespace TerminalOrganizer.Core.Windows
 {
@@ -308,6 +309,11 @@ namespace TerminalOrganizer.Core.Windows
         private readonly bool identified;
         private readonly string[] unmatchedTitles;
         private readonly bool mergeable;
+        private readonly bool hasRuleOutcome;
+        private readonly string identityName;
+        private readonly int? ruleRank;
+        private readonly string ruleReference;
+        private readonly RuleDiagnostic[] ruleDiagnostics;
 
         public WindowSnapshot(IntPtr handle, MonitorInfo monitor, DesktopFlagResult desktopStatus,
             TabSnapshot[] tabs, bool identified, string[] unmatchedTitles, bool mergeable)
@@ -316,8 +322,24 @@ namespace TerminalOrganizer.Core.Windows
         {
         }
 
+        /// <summary>
+        /// Today's constructor: identity derives from session evidence alone (the first tab's session
+        /// name when every tab is bound, otherwise none) and the snapshot carries no rule outcome.
+        /// </summary>
         public WindowSnapshot(WindowIdentity identity, MonitorInfo monitor, DesktopFlagResult desktopStatus,
             TabSnapshot[] tabs, bool identified, string[] unmatchedTitles, bool mergeable, TabReadQuality tabReadQuality)
+            : this(identity, monitor, desktopStatus, tabs, identified, unmatchedTitles, mergeable, tabReadQuality, null)
+        {
+        }
+
+        /// <summary>
+        /// The rule-aware constructor (SPEC-RULES-008): the identity name, rule rank and rule reference
+        /// come from the window rule outcome, and the snapshot reports that it carries one even when no
+        /// rule matched. A null outcome behaves like today's constructor (no rule outcome).
+        /// </summary>
+        public WindowSnapshot(WindowIdentity identity, MonitorInfo monitor, DesktopFlagResult desktopStatus,
+            TabSnapshot[] tabs, bool identified, string[] unmatchedTitles, bool mergeable, TabReadQuality tabReadQuality,
+            WindowRuleOutcome ruleOutcome)
         {
             this.Identity = identity;
             this.TabReadQuality = tabReadQuality;
@@ -330,7 +352,43 @@ namespace TerminalOrganizer.Core.Windows
             this.mergeable = mergeable && HasTrustedCompleteTabs && identity != null && identity.EqualsForMutation(identity)
                 && identified && this.tabs.Length == 1 && this.tabs[0] != null && this.tabs[0].Session != null
                 && this.tabs[0].Session.TmuxBacked && !string.IsNullOrWhiteSpace(this.tabs[0].Session.CommandLine);
+            if (ruleOutcome != null)
+            {
+                this.hasRuleOutcome = true;
+                this.identityName = ruleOutcome.IdentityName;
+                this.ruleRank = ruleOutcome.Rank;
+                this.ruleReference = ruleOutcome.Reference;
+                this.ruleDiagnostics = ruleOutcome.Diagnostics;
+            }
+            else
+            {
+                this.hasRuleOutcome = false;
+                this.identityName = identified && this.tabs.Length > 0 && this.tabs[0] != null && this.tabs[0].Session != null
+                    ? this.tabs[0].Session.Name : null;
+                this.ruleRank = null;
+                this.ruleReference = null;
+                this.ruleDiagnostics = new RuleDiagnostic[0];
+            }
         }
+
+        /// <summary>
+        /// True when the snapshot was built by either composer overload or by the rule-aware constructor
+        /// (even when no rule matched); false when built through today's constructors. This flag alone
+        /// tells the two cases apart — never the contents of the outcome.
+        /// </summary>
+        public bool HasRuleOutcome { get { return hasRuleOutcome; } }
+
+        /// <summary>The identity name after rule evaluation; null when none (see the constructors for the legacy derivation).</summary>
+        public string IdentityName { get { return identityName; } }
+
+        /// <summary>The rank the window's rules supplied; null when none (always null without a rule outcome).</summary>
+        public int? RuleRank { get { return ruleRank; } }
+
+        /// <summary>The reference of the rule that decided the window ("preset launcher-prefix", "rule n: ..."); null when none.</summary>
+        public string RuleReference { get { return ruleReference; } }
+
+        /// <summary>Timeout diagnostics raised while evaluating this window's tabs; empty without a rule outcome.</summary>
+        public RuleDiagnostic[] RuleDiagnostics { get { return (RuleDiagnostic[])ruleDiagnostics.Clone(); } }
 
         public WindowIdentity Identity { get; private set; }
         public TabReadQuality TabReadQuality { get; private set; }
@@ -366,13 +424,25 @@ namespace TerminalOrganizer.Core.Windows
     public static class WindowSnapshotBuilder
     {
         // @MX:NOTE: REQ-CMP-001 composition home (plan.md F file 1); ordering belongs to the caller's ZOrder.
+        // Equals the overload with a preset-only rule set (SPEC-RULES-008 REQ-ID-001).
         public static WindowSnapshot[] Compose(AcquiredWindow[] windows, SessionRecord[] sessions)
+        {
+            return Compose(windows, sessions, RuleSet.PresetOnly());
+        }
+
+        /// <summary>
+        /// Composes with a rule set: session binding is exactly as the two-argument overload (the matcher
+        /// never sees the rules), and each snapshot carries the rule outcome of its window. A null rule set
+        /// means no rules at all (preset off).
+        /// </summary>
+        public static WindowSnapshot[] Compose(AcquiredWindow[] windows, SessionRecord[] sessions, RuleSet rules)
         {
             List<WindowSnapshot> snapshots = new List<WindowSnapshot>();
             if (windows == null)
             {
                 return snapshots.ToArray();
             }
+            RuleSet effectiveRules = rules ?? RuleSetBuilder.Build(null, false);
             foreach (AcquiredWindow window in windows)
             {
                 if (window == null)
@@ -380,9 +450,11 @@ namespace TerminalOrganizer.Core.Windows
                     continue;
                 }
                 WindowMatchResult match = SessionMatcher.Match(ResolveTitles(window.Titles), sessions);
+                string windowTitle = window.Identity == null ? null : window.Identity.RawWindowTitle;
+                WindowRuleOutcome outcome = RuleEvaluator.EvaluateWindow(effectiveRules, match.Tabs, windowTitle);
                 snapshots.Add(new WindowSnapshot(window.Identity, window.Monitor, window.DesktopStatus,
                     match.Tabs, match.Identified, match.UnmatchedTitles, match.Mergeable,
-                    window.Titles == null ? TabReadQuality.Fallback : window.Titles.Quality));
+                    window.Titles == null ? TabReadQuality.Fallback : window.Titles.Quality, outcome));
             }
             return snapshots.ToArray();
         }

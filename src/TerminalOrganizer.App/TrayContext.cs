@@ -11,6 +11,7 @@ using TerminalOrganizer.Core.Assignment;
 using TerminalOrganizer.Core.Layouts;
 using TerminalOrganizer.Core.Monitors;
 using TerminalOrganizer.Core.Overflow;
+using TerminalOrganizer.Core.Rules;
 using TerminalOrganizer.Core.Windows;
 
 namespace TerminalOrganizer.App
@@ -288,9 +289,11 @@ namespace TerminalOrganizer.App
             ProductionPorts ports = null;
             WindowDiscovery windows = delegate(MonitorInfo monitor, string desktop)
             {
+                // REQ-SET-004: the rule set is rebuilt from this discovery's own settings read.
+                AppSettings read = LoadSettings(delegate(string message) { log.Append(message); });
                 DiscoveredWindows discovered = Discover(monitor, desktop, monitorProvider,
                     desktopReader, titleProbe, enumerator, sessionQuery, stateReader, labels,
-                    ports.RunToken, delegate(string message) { log.Append(message); });
+                    read.TitleRules.RuleSet, ports.RunToken, delegate(string message) { log.Append(message); });
                 return discovered;
             };
 
@@ -305,13 +308,19 @@ namespace TerminalOrganizer.App
                 MonitorInfo[] all = monitorProvider.GetMonitors();
                 List<CapturedMonitorRow> rows = new List<CapturedMonitorRow>();
                 PriorityOverride[] overrides = new PriorityOverride[0];
+                RuleSet rules = RuleSet.PresetOnly();
+                int defaultRank = TitleRulesSettings.DefaultRankValue;
                 if (target == null || target.StableKey == null)
                 {
-                    return new CapturedOverflowWorld(rows.ToArray(), overrides);
+                    return new CapturedOverflowWorld(rows.ToArray(), overrides, defaultRank);
                 }
                 try
                 {
-                    overrides = new SettingsStore(SettingsStore.DefaultPath()).Load().PriorityOverrides;
+                    // One settings read feeds the overrides, the rule set and the default rank of this capture.
+                    AppSettings read = LoadSettings(delegate(string message) { log.Append(message); });
+                    overrides = read.PriorityOverrides;
+                    rules = read.TitleRules.RuleSet;
+                    defaultRank = read.TitleRules.DefaultRank;
                 }
                 catch (Exception)
                 {
@@ -331,11 +340,11 @@ namespace TerminalOrganizer.App
                     }
                     DiscoveredWindows found = Discover(other, currentDesktop, monitorProvider,
                         desktopReader, titleProbe, enumerator, sessionQuery, stateReader, labels,
-                        ports.RunToken, delegate(string message) { log.Append(message); });
+                        rules, ports.RunToken, delegate(string message) { log.Append(message); });
                     rows.Add(new CapturedMonitorRow(other, layout.Zones,
                         TrayMenuBuilder.DerivePhysicalLabel(other, all), found));
                 }
-                return new CapturedOverflowWorld(rows.ToArray(), overrides);
+                return new CapturedOverflowWorld(rows.ToArray(), overrides, defaultRank);
             };
 
             // C3: one guarded cross-monitor SetWindowPos per planned move, reusing the
@@ -421,11 +430,19 @@ namespace TerminalOrganizer.App
         /// <summary>The menu and the manager actions use the same fail-closed policy across all monitors (B2: facts + snapshots joined by handle). The menu path never carries a run token (B4).</summary>
         internal static DiscoveredWindows ReadWindowsForMenu(LabelRegistry labels)
         {
+            // REQ-SET-004: every menu read rebuilds the rule set from its own settings read.
+            AppSettings read = LoadSettings(null);
             return Discover(null, null, new Win32MonitorProvider(), new VirtualDesktopReader(),
                 new UiaProbeClient(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
                     "TerminalOrganizer.UiaProbe.exe")),
                 new Win32WindowEnumerator(), new ProcessSessionQuery(),
-                new WindowStateReader(), labels, System.Threading.CancellationToken.None, null);
+                new WindowStateReader(), labels, read.TitleRules.RuleSet, System.Threading.CancellationToken.None, null);
+        }
+
+        /// <summary>One settings read for one discovery; the store is tolerant and never throws for file content.</summary>
+        private static AppSettings LoadSettings(Action<string> diagnostics)
+        {
+            return new SettingsStore(SettingsStore.DefaultPath(), diagnostics).Load();
         }
 
         private static int[] ReadTerminalPids()
@@ -448,7 +465,7 @@ namespace TerminalOrganizer.App
             IMonitorProvider monitorProvider, VirtualDesktopReader desktopReader,
             UiaProbeClient titleProbe, Win32WindowEnumerator enumerator,
             ProcessSessionQuery sessionQuery, WindowStateReader stateReader, LabelRegistry labels,
-            System.Threading.CancellationToken token, Action<string> trace)
+            RuleSet rules, System.Threading.CancellationToken token, Action<string> trace)
         {
             int[] pids = ReadTerminalPids();
             EnumeratedWindow[] enumerated;
@@ -484,7 +501,9 @@ namespace TerminalOrganizer.App
                     }
                     return CommandLineClassifier.ClassifyAll(queried.Children);
                 },
-                delegate(WindowSnapshot[] snapshots) { return ApplyLabels(snapshots, labels); });
+                delegate(WindowSnapshot[] snapshots) { return ApplyLabels(snapshots, labels); },
+                rules);
+            ReportRuleTimeouts(acquired.Snapshots, trace);
             // The scoped input already passed the monitor/desktop checks, so re-stitch the
             // pre-scope skip counters onto the result (B3 status keeps its full sweep view).
             return new DiscoveredWindows(acquired.Facts, acquired.Snapshots,
@@ -492,9 +511,34 @@ namespace TerminalOrganizer.App
                 scope.SkippedOtherDesktop, scope.SkippedUnknownDesktop, acquired.SkippedUnknownStateCount);
         }
 
+        /// <summary>Writes one line per rule that timed out while evaluating a window, once per distinct rule and position (REQ-LOG-001).</summary>
+        private static void ReportRuleTimeouts(WindowSnapshot[] snapshots, Action<string> trace)
+        {
+            if (trace == null || snapshots == null)
+            {
+                return;
+            }
+            foreach (WindowSnapshot snapshot in snapshots)
+            {
+                if (snapshot == null)
+                {
+                    continue;
+                }
+                foreach (RuleDiagnostic diagnostic in snapshot.RuleDiagnostics)
+                {
+                    string line = "title rule " + diagnostic.Position.ToString(CultureInfo.InvariantCulture)
+                        + " timed out; treated as no match";
+                    RuleDiagnosticLog.Report(trace, line, line);
+                }
+            }
+        }
+
+        // @MX:NOTE: the overlay keeps the synthetic session (Mergeable stays false); identity = label; the window's rule outcome is carried through.
         /// <summary>
-        /// REQ-PIPE-004 overlay: the user asserted the match, so a labeled unidentified
-        /// window is rebuilt for display with a synthetic session. Labels never authorize merge.
+        /// REQ-PIPE-004 overlay: the user asserted the match, so a labeled window without canonical
+        /// session evidence is rebuilt for display with a synthetic session (no command line). The
+        /// identity name becomes the label and the rule rank and reference ride along (SPEC-RULES-009
+        /// REQ-LBL-001). Labels never authorize merge.
         /// </summary>
         private static WindowSnapshot[] ApplyLabels(WindowSnapshot[] snapshots, LabelRegistry labels)
         {
@@ -521,8 +565,10 @@ namespace TerminalOrganizer.App
                 }
                 string title = snapshot.Tabs.Length > 0 ? snapshot.Tabs[0].Title : label;
                 TabSnapshot tab = new TabSnapshot(title, title, new SessionRecord(label, SessionKind.Local, null));
+                WindowRuleOutcome outcome = new WindowRuleOutcome(label, snapshot.RuleRank,
+                    snapshot.RuleReference, snapshot.RuleDiagnostics);
                 result.Add(new WindowSnapshot(snapshot.Identity, snapshot.Monitor, snapshot.DesktopStatus,
-                    new TabSnapshot[] { tab }, true, new string[0], false, snapshot.TabReadQuality));
+                    new TabSnapshot[] { tab }, true, new string[0], false, snapshot.TabReadQuality, outcome));
             }
             return result.ToArray();
         }
@@ -631,8 +677,11 @@ namespace TerminalOrganizer.App
 
         internal TrayShell()
         {
-            this.settings = new SettingsStore(SettingsStore.DefaultPath());
-            AppSettings current = this.settings.Load();
+            // REQ-LOG-001: title-rule diagnostics of every later read go to the log (once each per process).
+            // The bootstrap read below has no sink, so it consumes no diagnostic before the log exists.
+            this.settings = new SettingsStore(SettingsStore.DefaultPath(),
+                delegate(string line) { LogSink sink = this.log; if (sink != null) { sink.Append(line); } });
+            AppSettings current = new SettingsStore(SettingsStore.DefaultPath()).Load();
             // B1: themed application icon + the one-time onboarding dialog (an
             // incomplete first run persists firstRunCompleted=true after the dialog
             // closes). The checkbox applies the Startup-folder shortcut — an
@@ -726,9 +775,12 @@ namespace TerminalOrganizer.App
             DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels);
             ManagerSelector selector = current.ManagerSelector == null ? ManagerSelector.None() : current.ManagerSelector;
             ManagerResolution resolution = ManagerResolver.Resolve(selector, discovered.Facts, discovered.Snapshots);
+            // REQ-UI-001: one row text per window (rank and provenance from this read's overrides and default rank).
+            string[] rowTexts = RuleProvenance.RowTexts(discovered.Snapshots, current.PriorityOverrides,
+                current.TitleRules.DefaultRank);
             TrayMenuState state = new TrayMenuState(coordinator.IsBusy, current.Hotkey,
                 ports.Monitors.GetMonitors(), discovered.Snapshots, selector, resolution,
-                this.lastResultText, current.MergeEnabled, current.OverflowPolicy);
+                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts);
             TrayMenuEntry[] entries = TrayMenuBuilder.Build(state);
             ContextMenuStrip built = new ContextMenuStrip();
             foreach (TrayMenuEntry entry in entries)
@@ -800,7 +852,7 @@ namespace TerminalOrganizer.App
                 case TrayMenuEntryKind.LabelWindow:
                     {
                         WindowMenuKey labelKey = entry.WindowKey;
-                        string title = entry.Label;
+                        string title = entry.Value ?? entry.Label;
                         IntPtr handle = labelKey == null || labelKey.Identity == null ? IntPtr.Zero : labelKey.Identity.Handle;
                         item.Click += delegate { LabelWindow(handle, title); };
                         break;
@@ -908,6 +960,8 @@ namespace TerminalOrganizer.App
                 // NOW (request start); the Ask dialog only appears after pure planning
                 // proves overflow, marshalled through the B4 control (never a form from
                 // this worker).
+                // REQ-ID-004: the selector rides along so the run resolves the manager like the menu;
+                // the string stays the raw-title fallback.
                 OrganizeRunResult result = ports.Controller.RunWithChoice(target,
                     selector.IsEmpty ? null : selector.RawTitleFallback, monitorLabel, logPath,
                     current.OverflowPolicy, current.MergeEnabled,
@@ -916,7 +970,7 @@ namespace TerminalOrganizer.App
                         return choiceAsker.Prompt(prepared, mergeEnabled, token);
                     },
                     SaveOverflowPolicy,
-                    token);
+                    token, selector);
                 if (result != null)
                 {
                     this.lastResultText = result.Status != null ? result.Status.MenuSummary : result.ToString();
@@ -1163,12 +1217,7 @@ namespace TerminalOrganizer.App
         private void SaveManagerSelector(ManagerSelector selector)
         {
             ManagerSelector value = selector == null ? ManagerSelector.None() : selector;
-            AppSettings current = settings.Load();
-            settings.Save(new AppSettings(current.Hotkey, current.LogPath,
-                value.IsEmpty ? null : value.RawTitleFallback,
-                current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows, value,
-                current.PriorityOverrides, current.SchemaVersion, current.OverflowPolicy,
-                current.CrossMonitorRedistribution));
+            SaveManagerSelectorTo(settings, value);
             log.Append(value.IsEmpty
                 ? "manager window cleared"
                 : "manager window set to " + value.Kind + " '" + value.Value + "'");
@@ -1192,12 +1241,29 @@ namespace TerminalOrganizer.App
         /// </summary>
         private void SaveOverflowPolicy(OverflowPolicy policy)
         {
-            AppSettings current = settings.Load();
-            settings.Save(new AppSettings(current.Hotkey, current.LogPath, current.ManagerWindowName,
+            SaveOverflowPolicyTo(settings, policy);
+            log.Append("overflow policy set to " + policy);
+        }
+
+        // @MX:NOTE: the two tray saves are static so the title-rules block they carry is testable (REQ-SET-002); both keep the block of the settings they read.
+        internal static void SaveManagerSelectorTo(SettingsStore store, ManagerSelector selector)
+        {
+            ManagerSelector value = selector == null ? ManagerSelector.None() : selector;
+            AppSettings current = store.Load();
+            store.Save(new AppSettings(current.Hotkey, current.LogPath,
+                value.IsEmpty ? null : value.RawTitleFallback,
+                current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows, value,
+                current.PriorityOverrides, current.SchemaVersion, current.OverflowPolicy,
+                current.CrossMonitorRedistribution, current.TitleRules));
+        }
+
+        internal static void SaveOverflowPolicyTo(SettingsStore store, OverflowPolicy policy)
+        {
+            AppSettings current = store.Load();
+            store.Save(new AppSettings(current.Hotkey, current.LogPath, current.ManagerWindowName,
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows,
                 current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
-                policy, policy == OverflowPolicy.Redistribute));
-            log.Append("overflow policy set to " + policy);
+                policy, policy == OverflowPolicy.Redistribute, current.TitleRules));
         }
 
         /// <summary>The menu row value ids (B2 shipped) mapped back to the policy.</summary>

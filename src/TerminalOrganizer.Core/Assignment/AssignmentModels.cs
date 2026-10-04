@@ -53,6 +53,10 @@ namespace TerminalOrganizer.Core.Assignment
         public bool MayMove { get { return MutationStateTrusted && !FullScreen; } }
         public IntPtr Handle { get { return handle; } }
         public string Name { get { return name; } }
+        /// <summary>
+        /// True when the window has an identity name (SPEC-RULES-009): a rule-derived name or a launcher
+        /// session name, not only session evidence. Merge eligibility is a separate flag on the snapshot.
+        /// </summary>
         public bool Identified { get { return identified; } }
         public int Left { get { return left; } }
         public int Top { get { return top; } }

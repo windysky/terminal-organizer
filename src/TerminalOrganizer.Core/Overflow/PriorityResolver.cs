@@ -1,4 +1,5 @@
 using System;
+using TerminalOrganizer.Core.Rules;
 
 namespace TerminalOrganizer.Core.Overflow
 {
@@ -42,14 +43,35 @@ namespace TerminalOrganizer.Core.Overflow
         private readonly string monitorKey;
         private readonly int top;
         private readonly int left;
+        private readonly string ruleReference;
+        private readonly int? defaultRank;
 
+        /// <summary>
+        /// Today's constructor: the declared rank is the launcher-grammar digit (so its provenance is the
+        /// preset), the default rank is 500, and no rule reference accompanies a derived rank.
+        /// </summary>
         public PriorityInput(string windowId, int? manualRank, int? declaredRank,
             DerivedPriorityClass derivedClass, bool manager, bool fullScreen, bool stableOccupant,
             int zOrderIndex, string monitorKey, int top, int left)
+            : this(windowId, manualRank, declaredRank, declaredRank.HasValue ? LauncherPrefixPreset.Reference : null, null,
+                derivedClass, manager, fullScreen, stableOccupant, zOrderIndex, monitorKey, top, left)
         {
+        }
+
+        /// <summary>
+        /// The rule-aware constructor (SPEC-RULES-008): the rule rank takes the declared slot; the rule
+        /// reference names the rank-supplying rule, or the matched rule when none supplied a rank (null
+        /// when no rule matched); the default rank applies to an unidentified window (0..999, else 500).
+        /// </summary>
+        public PriorityInput(string windowId, int? manualRank, int? ruleRank, string ruleReference, int? defaultRank,
+            DerivedPriorityClass derivedClass, bool manager, bool fullScreen, bool stableOccupant,
+            int zOrderIndex, string monitorKey, int top, int left)
+        {
+            this.ruleReference = ruleReference;
+            this.defaultRank = defaultRank;
             this.windowId = windowId;
             this.manualRank = manualRank;
-            this.declaredRank = declaredRank;
+            this.declaredRank = ruleRank;
             this.derivedClass = derivedClass;
             this.manager = manager;
             this.fullScreen = fullScreen;
@@ -65,8 +87,14 @@ namespace TerminalOrganizer.Core.Overflow
         /// <summary>The persisted manual rank; valid only within 0..999.</summary>
         public int? ManualRank { get { return manualRank; } }
 
-        /// <summary>The single-digit rank declared in the window-title prefix grammar.</summary>
+        /// <summary>The rank a title rule or the launcher preset supplied (0..999 from a rule, a single digit from the grammar).</summary>
         public int? DeclaredRank { get { return declaredRank; } }
+
+        /// <summary>The reference of the rank-supplying rule, or of the matched rule when none supplied a rank; null when no rule matched.</summary>
+        public string RuleReference { get { return ruleReference; } }
+
+        /// <summary>The default rank for an unidentified window; null means 500 (a value outside 0..999 also means 500).</summary>
+        public int? DefaultRank { get { return defaultRank; } }
 
         public DerivedPriorityClass DerivedClass { get { return derivedClass; } }
         public bool Manager { get { return manager; } }
@@ -98,11 +126,20 @@ namespace TerminalOrganizer.Core.Overflow
         private readonly int top;
         private readonly int left;
         private readonly string reason;
+        private readonly string provenance;
 
         public ResolvedPriority(string windowId, bool immovable, string immovableReason,
             PrioritySource source, int rank, int zOrderIndex, string monitorKey,
             int top, int left, string reason)
+            : this(windowId, immovable, immovableReason, source, rank, zOrderIndex, monitorKey, top, left, reason, reason)
         {
+        }
+
+        public ResolvedPriority(string windowId, bool immovable, string immovableReason,
+            PrioritySource source, int rank, int zOrderIndex, string monitorKey,
+            int top, int left, string reason, string provenance)
+        {
+            this.provenance = provenance;
             this.windowId = windowId;
             this.immovable = immovable;
             this.immovableReason = immovableReason;
@@ -133,6 +170,13 @@ namespace TerminalOrganizer.Core.Overflow
 
         /// <summary>Short deterministic explanation of the winning rule.</summary>
         public string Reason { get { return reason; } }
+
+        /// <summary>
+        /// Where the resolved rank came from: "manual", "preset launcher-prefix", "rule n: text"
+        /// ("rule n: marker m"), "session Local|Remote|WindowsNative" or "default", followed by
+        /// " (matched ref)" when a rule matched without supplying the rank. Never truncated.
+        /// </summary>
+        public string Provenance { get { return provenance; } }
 
         public override string ToString()
         {
@@ -178,17 +222,54 @@ namespace TerminalOrganizer.Core.Overflow
             {
                 return new ResolvedPriority(input.WindowId, false, null, PrioritySource.Manual,
                     input.ManualRank.Value, input.ZOrderIndex, input.MonitorKey,
-                    input.Top, input.Left, "manual");
+                    input.Top, input.Left, "manual", "manual");
             }
             if (input.DeclaredRank.HasValue)
             {
                 return new ResolvedPriority(input.WindowId, false, null, PrioritySource.Declared,
                     input.DeclaredRank.Value, input.ZOrderIndex, input.MonitorKey,
-                    input.Top, input.Left, "declared");
+                    input.Top, input.Left, "declared", HasReference(input) ? input.RuleReference : "declared");
             }
+            // @MX:NOTE: source mapping (SPEC-RULES-008 A2) — a rule or preset rank is Declared; a session-class
+            // or default rank is Derived, so move reasons keep reading manual / declared / derived.
+            bool unidentified = input.DerivedClass == DerivedPriorityClass.Unidentified;
+            int rank = unidentified ? ResolveDefaultRank(input.DefaultRank) : DerivedRank(input.DerivedClass);
+            string basis = unidentified ? "default" : "session " + SessionName(input.DerivedClass);
+            string provenance = HasReference(input) ? basis + " (matched " + input.RuleReference + ")" : basis;
             return new ResolvedPriority(input.WindowId, false, null, PrioritySource.Derived,
-                DerivedRank(input.DerivedClass), input.ZOrderIndex, input.MonitorKey,
-                input.Top, input.Left, "derived:" + input.DerivedClass);
+                rank, input.ZOrderIndex, input.MonitorKey,
+                input.Top, input.Left, "derived:" + input.DerivedClass, provenance);
+        }
+
+        /// <summary>A null or empty rule reference means no rule matched.</summary>
+        private static bool HasReference(PriorityInput input)
+        {
+            return !string.IsNullOrEmpty(input.RuleReference);
+        }
+
+        /// <summary>The default rank: the given value within 0..999, else 500.</summary>
+        private static int ResolveDefaultRank(int? defaultRank)
+        {
+            if (defaultRank.HasValue && defaultRank.Value >= ManualRankMin && defaultRank.Value <= ManualRankMax)
+            {
+                return defaultRank.Value;
+            }
+            return 500;
+        }
+
+        private static string SessionName(DerivedPriorityClass derivedClass)
+        {
+            switch (derivedClass)
+            {
+                case DerivedPriorityClass.WindowsNative:
+                    return "WindowsNative";
+                case DerivedPriorityClass.LocalSession:
+                    return "Local";
+                case DerivedPriorityClass.RemoteSession:
+                    return "Remote";
+                default:
+                    return derivedClass.ToString();
+            }
         }
 
         /// <summary>

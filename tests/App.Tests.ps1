@@ -2664,7 +2664,7 @@ Describe 'C3 Overflow policy and pre-mutation choice' {
             $reloaded = $script:C3Store.Load()
             $reloaded.OverflowPolicy.ToString() | Should BeExactly 'Redistribute'
             $reloaded.CrossMonitorRedistribution | Should Be $true
-            $reloaded.SchemaVersion | Should Be 2
+            $reloaded.SchemaVersion | Should Be 3
         }
         finally {
             Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
@@ -2782,5 +2782,874 @@ Describe 'B5 handoff supervised-merge commands' {
         }).Count | Should Be 1
         # The manual-verification language is retained.
         $handoff.ToLowerInvariant().Contains('manual verification') | Should Be $true
+    }
+}
+
+# --- SPEC-RULES-009 M1: settings v3, migration, save paths, diagnostics logging ---
+# Expected values come from SPEC-RULES-009 acceptance.md and plan.md section J.3, never from the code under test.
+
+Add-Type -AssemblyName System.Web.Extensions
+$script:R9Ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+$script:R9AppAsm = [TerminalOrganizer.App.TrayMenuBuilder].Assembly
+$script:R9RuleListU = '{"match":"PowerShell*","rank":200},{"match":"regex:^ssh (?<name>[^ ]+)","rank":400},{"match":"regex:^(?<rank>[0-9]{1,4})-(?<name>.+)$"},{"marker":"#"},{"match":"*--attach YODA*","on":"commandline","rank":250}'
+$script:R9V2 = '{"hotkey":"Ctrl+Alt+O","managerWindowName":"OC_YODA1","mergeEnabled":false,"firstRunCompleted":true,"startWithWindows":false,"managerSelector":{"kind":"Session","value":"YODA1","rawTitleFallback":"OC_YODA1"},"priorityOverrides":[{"kind":"RawTitle","value":"notes","rawTitleFallback":"notes","rank":700}],"schemaVersion":2,"overflowPolicy":"Stack","crossMonitorRedistribution":false}'
+$script:R9Unversioned = '{"hotkey":"Ctrl+Alt+O","firstRunCompleted":true}'
+
+function New-R9TempDir {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('r9-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $dir
+}
+
+# A version-N file: the v2 content with the version replaced and an optional titleRules value (JSON text).
+function Get-R9File([int]$Version, [string]$TitleRulesJson, [bool]$FirstRun = $true) {
+    $json = $script:R9V2.Replace('"schemaVersion":2', ('"schemaVersion":' + $Version))
+    if (-not $FirstRun) { $json = $json.Replace('"firstRunCompleted":true', '"firstRunCompleted":false') }
+    if ($TitleRulesJson) { $json = $json.Substring(0, $json.Length - 1) + ',"titleRules":' + $TitleRulesJson + '}' }
+    $json
+}
+
+function Write-R9File([string]$Dir, [string]$Json, [string]$Name = 'settings.json') {
+    $path = Join-Path $Dir $Name
+    [IO.File]::WriteAllText($path, $Json)
+    $path
+}
+
+function Get-R9Block([string]$Path) {
+    $root = $script:R9Ser.DeserializeObject([IO.File]::ReadAllText($Path))
+    if ($root.ContainsKey('titleRules')) { $script:R9Ser.Serialize($root['titleRules']) } else { '<absent>' }
+}
+
+function Get-R9ShellMethod([string]$Name) {
+    $shell = $script:R9AppAsm.GetType('TerminalOrganizer.App.TrayShell', $true)
+    $shell.GetMethod($Name, [Reflection.BindingFlags]'NonPublic,Static')
+}
+
+Describe 'SPEC-RULES-009 AC-006 v2 to v3 migration' {
+    $dir = New-R9TempDir
+    It 'a v2 file loads preset launcher-prefix, no user rules, default rank 500, version 3, and keeps every other setting' {
+        $path = Write-R9File $dir $script:R9V2
+        $s = ([TerminalOrganizer.App.SettingsStore]::new($path)).Load()
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        $s.TitleRules.PresetEnabled | Should Be $true
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+        $s.TitleRules.DefaultRank | Should Be 500
+        $s.SchemaVersion | Should Be 3
+        $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+        $s.ManagerSelector.Kind.ToString() | Should BeExactly 'Session'
+        $s.ManagerSelector.Value | Should BeExactly 'YODA1'
+        $s.ManagerSelector.RawTitleFallback | Should BeExactly 'OC_YODA1'
+        @($s.PriorityOverrides).Count | Should Be 1
+        $s.PriorityOverrides[0].Selector.Value | Should BeExactly 'notes'
+        $s.PriorityOverrides[0].Rank | Should Be 700
+        $s.OverflowPolicy.ToString() | Should BeExactly 'Stack'
+    }
+    It 'an unversioned file loads preset launcher-prefix, no user rules, default rank 500 and version 3' {
+        $path = Write-R9File $dir $script:R9Unversioned 'unversioned.json'
+        $s = ([TerminalOrganizer.App.SettingsStore]::new($path)).Load()
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+        $s.TitleRules.DefaultRank | Should Be 500
+        $s.SchemaVersion | Should Be 3
+        $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+        $s.FirstRunCompleted | Should Be $true
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
+Describe 'SPEC-RULES-009 AC-007 every save path keeps the block' {
+    $dir = New-R9TempDir
+    $block = '{"preset":"launcher-prefix","defaultRank":450,"rules":[' + $script:R9RuleListU + ']}'
+    It 'the manager-choice save helper on a v2 file writes version 3 and preset launcher-prefix, and HG2_YODA1 still resolves through the preset' {
+        $path = Write-R9File $dir $script:R9V2
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $selector = [TerminalOrganizer.Core.Assignment.ManagerSelector]::new(
+            [TerminalOrganizer.Core.Assignment.ManagerSelectorKind]::Session, 'YODA1', 'OC_YODA1')
+        $null = (Get-R9ShellMethod 'SaveManagerSelectorTo').Invoke($null, @($store, $selector))
+        $s = $store.Load()
+        $s.SchemaVersion | Should Be 3
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+        $r = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateTab($s.TitleRules.RuleSet, 'HG2_YODA1', $null)
+        $r.Name | Should BeExactly 'YODA1'
+        $r.Reference | Should BeExactly 'preset launcher-prefix'
+        $s.ManagerSelector.Value | Should BeExactly 'YODA1'
+    }
+    It 'the overflow-policy save helper keeps preset, default rank and all five rules of a version-3 file' {
+        $path = Write-R9File $dir (Get-R9File 3 $block) 'v3-overflow.json'
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $policy = [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Merge')
+        $null = (Get-R9ShellMethod 'SaveOverflowPolicyTo').Invoke($null, @($store, $policy))
+        $s = $store.Load()
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        $s.TitleRules.DefaultRank | Should Be 450
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 5
+        $s.OverflowPolicy.ToString() | Should BeExactly 'Merge'
+        (Get-R9Block $path) | Should BeExactly ($script:R9Ser.Serialize($script:R9Ser.DeserializeObject($block)))
+    }
+    It 'the first-run save keeps the block' {
+        $path = Write-R9File $dir (Get-R9File 3 $block $false) 'v3-firstrun.json'
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $current = $store.Load()
+        $current.FirstRunCompleted | Should Be $false
+        $show = [TerminalOrganizer.App.FirstRunShow] {
+            param($icon, $hotkey, $startWith)
+            [TerminalOrganizer.App.FirstRunResult]::new($true, $false)
+        }
+        $flowType = $script:R9AppAsm.GetType('TerminalOrganizer.App.FirstRunFlow', $true)
+        $ensure = $flowType.GetMethod('EnsureCompletedWithStartup', [Reflection.BindingFlags]'NonPublic,Static')
+        $null = $ensure.Invoke($null, @($current, $null, $store, $show, $null))
+        $s = $store.Load()
+        $s.FirstRunCompleted | Should Be $true
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        $s.TitleRules.DefaultRank | Should Be 450
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 5
+    }
+    It 'a save built with the eleven-argument settings constructor (no block) writes the block the file already had' {
+        $path = Write-R9File $dir (Get-R9File 3 $block) 'v3-old-ctor.json'
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $old = [TerminalOrganizer.App.AppSettings]::new('Ctrl+Alt+O', 'test.log', $null, $false, $true, $false,
+            $null, $null, 3, [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Ask'), $false)
+        $store.Save($old)
+        $s = $store.Load()
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        $s.TitleRules.DefaultRank | Should Be 450
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 5
+        $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
+Describe 'SPEC-RULES-009 AC-008 fresh and invalid settings' {
+    $dir = New-R9TempDir
+    It 'no settings file loads preset none, no rules and default rank 500' {
+        $s = (New-Object TerminalOrganizer.App.SettingsStore -ArgumentList (Join-Path $dir 'missing.json')).Load()
+        $s.TitleRules.Preset | Should BeExactly 'none'
+        $s.TitleRules.PresetEnabled | Should Be $false
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+        $s.TitleRules.DefaultRank | Should Be 500
+        @($s.TitleRules.DiagnosticLines).Count | Should Be 0
+    }
+    It 'a version-3 file without titleRules, and one whose titleRules lacks preset, load the same way' {
+        foreach ($case in @(@('v3-none.json', (Get-R9File 3 $null)), @('v3-nopreset.json', (Get-R9File 3 '{"defaultRank":500}')))) {
+            $s = (New-Object TerminalOrganizer.App.SettingsStore -ArgumentList (Write-R9File $dir $case[1] $case[0])).Load()
+            $s.TitleRules.Preset | Should BeExactly 'none'
+            @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+            $s.TitleRules.DefaultRank | Should Be 500
+            @($s.TitleRules.DiagnosticLines).Count | Should Be 0
+            $s.SchemaVersion | Should Be 3
+        }
+    }
+    It 'each invalid titleRules file loads the default for its part, reports one diagnostic, keeps every other setting, and the invalid value survives a save and reload' {
+        $invalid = @(
+            '"oops"',
+            '[]',
+            '{"preset":"none","rules":"oops"}',
+            '{"preset":"fancy"}',
+            '{"preset":"Launcher-Prefix"}',
+            '{"preset":"none","defaultRank":1000}',
+            '{"preset":"none","defaultRank":"450"}',
+            '{"preset":"none","defaultRank":450.5}'
+        )
+        $i = 0
+        foreach ($value in $invalid) {
+            $i++
+            $path = Write-R9File $dir (Get-R9File 3 $value) ('invalid-' + $i + '.json')
+            $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+            $s = $store.Load()
+            $s.TitleRules.Preset | Should BeExactly 'none'
+            @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+            $s.TitleRules.DefaultRank | Should Be 500
+            @($s.TitleRules.DiagnosticLines).Count | Should Be 1
+            $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+            $s.ManagerSelector.Value | Should BeExactly 'YODA1'
+            @($s.PriorityOverrides).Count | Should Be 1
+            $s.OverflowPolicy.ToString() | Should BeExactly 'Stack'
+            $before = Get-R9Block $path
+            $store.Save($s)
+            (Get-R9Block $path) | Should BeExactly $before
+            $again = $store.Load()
+            $again.TitleRules.Preset | Should BeExactly 'none'
+            $again.TitleRules.DefaultRank | Should Be 500
+            @($again.TitleRules.DiagnosticLines).Count | Should Be 1
+            $again.TitleRules.DiagnosticLines[0] | Should BeExactly $s.TitleRules.DiagnosticLines[0]
+        }
+    }
+    It 'a file reporting schemaVersion 4 loads its title rules and reports version 4' {
+        $block = '{"preset":"launcher-prefix","defaultRank":450,"rules":[' + $script:R9RuleListU + ']}'
+        $path = Write-R9File $dir (Get-R9File 4 $block) 'v4.json'
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $s = $store.Load()
+        $s.SchemaVersion | Should Be 4
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        $s.TitleRules.DefaultRank | Should Be 450
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 5
+        $store.Save($s)
+        $store.Load().SchemaVersion | Should Be 4
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
+Describe 'SPEC-RULES-009 AC-009 round trip and re-read' {
+    $dir = New-R9TempDir
+    $extended = '{"preset":"launcher-prefix","defaultRank":450,"rules":[' + $script:R9RuleListU + ',{"match":"a","rank":"high"},{"match":"b*","rank":20,"note":"x"}]}'
+    It 'preset, default rank and all seven definitions survive load, save, load at the JSON-value level, malformed rule and unknown key included' {
+        $path = Write-R9File $dir (Get-R9File 3 $extended)
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $s = $store.Load()
+        @($s.TitleRules.RuleDefinitions).Count | Should Be 7
+        $s.TitleRules.DefaultRank | Should Be 450
+        $store.Save($s)
+        (Get-R9Block $path) | Should BeExactly ($script:R9Ser.Serialize($script:R9Ser.DeserializeObject($extended)))
+        $again = $store.Load()
+        @($again.TitleRules.RuleDefinitions).Count | Should Be 7
+        $again.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+        (Get-R9Block $path) | Should Match '"note":"x"'
+        (Get-R9Block $path) | Should Match '"rank":"high"'
+        # 1 preset + 5 valid + 1 valid extra; the malformed rank rule is skipped with one diagnostic.
+        @($again.TitleRules.RuleSet.Rules).Count | Should Be 7
+        @($again.TitleRules.RuleSet.Diagnostics).Count | Should Be 1
+    }
+    It 'a settings edit between two reads is used by the second read without a restart' {
+        $path = Write-R9File $dir (Get-R9File 3 '{"preset":"none","rules":[{"match":"first*","rank":11}]}') 'edit.json'
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+        $a = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateTab($store.Load().TitleRules.RuleSet, 'first one', $null)
+        $a.Rank | Should Be 11
+        [IO.File]::WriteAllText($path, (Get-R9File 3 '{"preset":"none","rules":[{"match":"first*","rank":22}]}'))
+        $b = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateTab($store.Load().TitleRules.RuleSet, 'first one', $null)
+        $b.Rank | Should Be 22
+    }
+    It 'no .cs file under src mentions FileSystemWatcher' {
+        $hits = @(Get-ChildItem -Path (Join-Path $repoRoot 'src') -Recurse -Filter '*.cs' |
+            Select-String -Pattern 'FileSystemWatcher' -SimpleMatch)
+        $hits.Count | Should Be 0
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
+Describe 'SPEC-RULES-009 AC-012 one log line per diagnostic' {
+    $dir = New-R9TempDir
+    It 'five loads of a file with two bad rules write exactly two lines; a changed rule text adds exactly one' {
+        $id = [guid]::NewGuid().ToString('N')
+        $json = Get-R9File 3 ('{"preset":"none","rules":[{"match":"regex:([' + $id + '","rank":1},{"match":"x' + $id + '","on":"window"}]}')
+        $path = Write-R9File $dir $json
+        $script:R9Lines = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R9Lines.Add($m) }
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path, $sink)
+        1..5 | ForEach-Object { $null = $store.Load() }
+        $script:R9Lines.Count | Should Be 2
+        @($script:R9Lines | Where-Object { $_ -match '^title rule [12] skipped: .+' }).Count | Should Be 2
+        $changed = $json.Replace('([' + $id, '([x' + $id)
+        [IO.File]::WriteAllText($path, $changed)
+        $null = $store.Load()
+        $null = $store.Load()
+        $script:R9Lines.Count | Should Be 3
+    }
+    It 'a settings-level diagnostic uses the title rules prefix and is also written once' {
+        $id = [guid]::NewGuid().ToString('N')
+        $path = Write-R9File $dir (Get-R9File 3 ('{"preset":"fancy' + $id + '"}')) 'level.json'
+        $script:R9Lines = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R9Lines.Add($m) }
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path, $sink)
+        1..3 | ForEach-Object { $null = $store.Load() }
+        $script:R9Lines.Count | Should Be 1
+        $script:R9Lines[0] | Should Match '^title rules: .+'
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
+# --- SPEC-RULES-009 M2: identity consumers, Identity selector, labels, priority wiring, organize-run manager ---
+# Expected values come from SPEC-RULES-009 acceptance.md and plan.md section J, never from the code under test.
+
+$script:R9Mon1 = New-TMonitor 1
+$script:R9Mon2 = New-TMonitor 2
+$script:R9YodaCmd = 'wsl.exe -d Ubuntu --exec /home/dev/run_dev_launch.sh --attach YODA1'
+
+function New-R9Rules([bool]$Preset = $true, [string]$ListJson = $script:R9RuleListU) {
+    $defs = $script:R9Ser.DeserializeObject('[' + $ListJson + ']')
+    [TerminalOrganizer.Core.Rules.RuleSetBuilder]::Build($defs, $Preset)
+}
+
+function New-R9Acquired([long]$Handle, [string[]]$Titles) {
+    $identity = [TerminalOrganizer.Core.Windows.WindowIdentity]::new([IntPtr]$Handle, 42, 12345, 'CASCADIA_HOSTING_WINDOW_CLASS', $Titles[0])
+    [TerminalOrganizer.Core.Windows.AcquiredWindow]::new($identity,
+        [TerminalOrganizer.Core.Windows.TabTitleResult]::Ok([string[]]$Titles),
+        $script:R9Mon1, [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true))
+}
+
+function Get-R9Snapshots($Acquired, $Sessions, $Rules) {
+    [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose(
+        [TerminalOrganizer.Core.Windows.AcquiredWindow[]]@($Acquired),
+        [TerminalOrganizer.Core.Windows.SessionRecord[]]@($Sessions), $Rules)
+}
+
+function New-R9Fact([string]$Id, [long]$Handle, [string]$Name, [bool]$Identified = $true, [int]$Left = 0, [int]$Top = 0, [int]$Width = 400, [int]$Height = 300) {
+    [TerminalOrganizer.Core.Assignment.WindowFact]::new($Id, [IntPtr]$Handle, $Name, $Identified, $Left, $Top, $Width, $Height, $false, $false, $false)
+}
+
+function New-R9Selector([string]$Kind, [string]$Value, [string]$Fallback) {
+    [TerminalOrganizer.Core.Assignment.ManagerSelector]::new(
+        [TerminalOrganizer.Core.Assignment.ManagerSelectorKind]::Parse([TerminalOrganizer.Core.Assignment.ManagerSelectorKind], $Kind), $Value, $Fallback)
+}
+
+# Composes the one-organized-monitor (M1) plus one-free-destination (M2) world of plan.md J.3 through the
+# 11-parameter composer overload, and returns the composed snapshot and the cross-monitor plan.
+function Get-R9World($Facts, $Snaps, $Overrides, [int]$DefaultRank) {
+    $z1 = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 0, 0, 960, 1040))
+    $z2 = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 1920, 0, 960, 1040))
+    $plan1 = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($z1, [TerminalOrganizer.Core.Assignment.WindowFact[]]@($Facts), $null)
+    $plan2 = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($z2, [TerminalOrganizer.Core.Assignment.WindowFact[]]@(), $null)
+    $zs = New-Object 'TerminalOrganizer.Core.Geometry.Zone[][]' 2
+    $zs[0] = $z1
+    $zs[1] = $z2
+    $rows = New-Object 'System.Collections.Generic.List[TerminalOrganizer.Core.Windows.EnumeratedWindow]'
+    foreach ($snap in $Snaps) {
+        $rows.Add([TerminalOrganizer.Core.Windows.EnumeratedWindow]::new($snap.Handle, $script:R9Mon1,
+            [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true), $snap.Identity))
+    }
+    $composed = [TerminalOrganizer.App.CrossMonitorSnapshotComposer]::Compose('desk',
+        [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($script:R9Mon1, $script:R9Mon2), $zs,
+        [string[]]@('M1', 'M2'), [TerminalOrganizer.Core.Assignment.AssignmentPlan[]]@($plan1, $plan2),
+        $rows.ToArray(), [TerminalOrganizer.Core.Assignment.WindowFact[]]@($Facts),
+        [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($Snaps),
+        [TerminalOrganizer.App.PriorityOverride[]]@($Overrides), $script:R9Mon1.StableKey, $DefaultRank)
+    $plan = [TerminalOrganizer.Core.Overflow.CrossMonitorPlanner]::Plan($composed)
+    @{ Composed = $composed; Plan = $plan }
+}
+
+function Get-R9Priority($World, [string]$Id) {
+    @($World.Composed.Windows | Where-Object { $_.WindowId -eq $Id })[0].Priority
+}
+
+Describe 'SPEC-RULES-009 AC-001 name-only consumers accept named windows' {
+    $rules = New-R9Rules
+    $rows = @(
+        [TerminalOrganizer.Core.Windows.EnumeratedWindow]::new([IntPtr]11, $script:R9Mon1, [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true),
+            [TerminalOrganizer.Core.Windows.WindowIdentity]::new([IntPtr]11, 42, 12345, 'CASCADIA_HOSTING_WINDOW_CLASS', 'powershell')),
+        [TerminalOrganizer.Core.Windows.EnumeratedWindow]::new([IntPtr]12, $script:R9Mon1, [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true),
+            [TerminalOrganizer.Core.Windows.WindowIdentity]::new([IntPtr]12, 42, 12345, 'CASCADIA_HOSTING_WINDOW_CLASS', 'OC_YODA1')),
+        [TerminalOrganizer.Core.Windows.EnumeratedWindow]::new([IntPtr]13, $script:R9Mon1, [TerminalOrganizer.Core.Monitors.DesktopFlagResult]::Ok($true),
+            [TerminalOrganizer.Core.Windows.WindowIdentity]::new([IntPtr]13, 42, 12345, 'CASCADIA_HOSTING_WINDOW_CLASS', 'Untitled tab'))
+    )
+    $titles = @{ 11 = 'powershell'; 12 = 'OC_YODA1'; 13 = 'Untitled tab' }
+    $state = [Func[IntPtr, TerminalOrganizer.Core.Assignment.WindowState]] { param($h) [TerminalOrganizer.Core.Assignment.WindowState]::new(0, 0, 400, 300, $false, $false, $false) }
+    $tabs = [TerminalOrganizer.Core.Overflow.TabTitleRead] { param($h) [TerminalOrganizer.Core.Windows.TabTitleResult]::Ok([string[]]@($titles[[int]$h.ToInt64()])) }
+    $sessions = [TerminalOrganizer.App.SessionRecordsRead] { param($pids) @([TerminalOrganizer.Core.Windows.SessionRecord]::new('YODA1', [TerminalOrganizer.Core.Windows.SessionKind]::Local, $script:R9YodaCmd)) }
+
+    It 'a window fact built by rule-set discovery reports that it has an identity name, for W-PS and the unmatched title alike' {
+        $found = [TerminalOrganizer.App.DiscoveryPolicy]::Acquire($rows, $script:R9Mon1, $state, $tabs, $sessions, $null, $rules)
+        @($found.Facts).Count | Should Be 3
+        foreach ($fact in $found.Facts) { $fact.Identified | Should Be $true }
+    }
+    It 'W-PS and Untitled tab appear among the manager candidates of the tray menu model' {
+        $found = [TerminalOrganizer.App.DiscoveryPolicy]::Acquire($rows, $script:R9Mon1, $state, $tabs, $sessions, $null, $rules)
+        $state9 = [TerminalOrganizer.App.TrayMenuState]::new($false, 'Ctrl+Alt+O', [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($script:R9Mon1),
+            $found.Snapshots, [TerminalOrganizer.Core.Assignment.ManagerSelector]::None(), $null, $null, $false)
+        $entries = [TerminalOrganizer.App.TrayMenuBuilder]::Build($state9)
+        $manager = @($entries | Where-Object { $_.Kind.ToString() -eq 'ManagerRoot' })[0]
+        $group = @($manager.Children | Where-Object { $_.Kind.ToString() -eq 'ManagerCandidateGroup' })[0]
+        $labels = @($group.Children | ForEach-Object { $_.Label })
+        ($labels -contains 'powershell') | Should Be $true
+        ($labels -contains 'Untitled tab') | Should Be $true
+        ($labels -contains 'OC_YODA1') | Should Be $true
+    }
+    It 'a RawTitle selector powershell resolves to W-PS and the zone assigner pins it as manager' {
+        $found = [TerminalOrganizer.App.DiscoveryPolicy]::Acquire($rows, $script:R9Mon1, $state, $tabs, $sessions, $null, $rules)
+        $selector = New-R9Selector 'RawTitle' 'powershell' 'powershell'
+        $resolution = [TerminalOrganizer.Core.Assignment.ManagerResolver]::Resolve($selector, $found.Facts, $found.Snapshots)
+        $resolution.Status.ToString() | Should BeExactly 'Resolved'
+        $plan = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign((New-CZones), $found.Facts, 'powershell')
+        $plan.ManagerPinned | Should Be $true
+    }
+    It 'a fact passed in with no identity name still yields window unidentified' {
+        $fact = New-R9Fact 'wx' 14 'powershell' $false
+        $plan = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign((New-CZones), @($fact), 'powershell')
+        $plan.ManagerPinned | Should Be $false
+        $plan.ManagerSkippedReason | Should Match 'unidentified'
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-002 strict consumers unchanged' {
+    It 'a stacked zone with W-PS as its base is planned stack-only and W-PS is never a merge source' {
+        $rules = New-R9Rules
+        $sess = New-CSession 'YODA2' 'Local' 'wsl.exe -d Ubuntu --exec /home/dev/run_dev_launch.sh --attach YODA2'
+        foreach ($order in @('ps-first', 'ps-second')) {
+            $acq = @((New-R9Acquired 21 @('powershell')), (New-R9Acquired 22 @('OC_YODA2')))
+            $snaps = Get-R9Snapshots $acq @($sess) $rules
+            $psTop = if ($order -eq 'ps-first') { 0 } else { 400 }
+            $xTop = if ($order -eq 'ps-first') { 400 } else { 0 }
+            $facts = @((New-R9Fact 'wps' 21 'powershell' $true 0 $psTop), (New-R9Fact 'wx' 22 'OC_YODA2' $true 0 $xTop))
+            $zone = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 0, 0, 960, 1040))
+            $plan = [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($zone, [TerminalOrganizer.Core.Assignment.WindowFact[]]$facts, $null)
+            $merge = [TerminalOrganizer.Core.Overflow.MergePlanner]::Plan($plan, [TerminalOrganizer.Core.Windows.WindowSnapshot[]]$snaps)
+            (@($merge.Merges | Where-Object { $_.SourceWindowId -eq 'wps' })).Count | Should Be 0
+            if ($order -eq 'ps-first') {
+                @($merge.StackOnlyZoneIds).Count | Should Be 1
+                @($merge.Merges).Count | Should Be 0
+            }
+        }
+    }
+    It 'a catch-all fixed-name rule and an open session of that name neither identify nor make a window mergeable' {
+        $rules = New-R9Rules $true '{"match":"*","name":"YODA3"}'
+        $sess = New-CSession 'YODA3' 'Local' 'wsl.exe -d Ubuntu --exec /home/dev/run_dev_launch.sh --attach YODA3'
+        $snaps = Get-R9Snapshots @((New-R9Acquired 23 @('scratch'))) @($sess) $rules
+        $snaps[0].Identified | Should Be $false
+        $snaps[0].Mergeable | Should Be $false
+        $snaps[0].IdentityName | Should BeExactly 'YODA3'
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-003 Identity selector kind' {
+    $rules = New-R9Rules
+    It 'W-SSH is chosen as manager through an Identity selector with value server1 and raw-title fallback ssh server1' {
+        $snap = (Get-R9Snapshots @((New-R9Acquired 31 @('ssh server1'))) @() $rules)[0]
+        $selector = [TerminalOrganizer.Core.Assignment.ManagerResolver]::CreateSelector($snap, $null)
+        $selector.Kind.ToString() | Should BeExactly 'Identity'
+        $selector.Value | Should BeExactly 'server1'
+        $selector.RawTitleFallback | Should BeExactly 'ssh server1'
+    }
+    It 'after the title changes to ssh server1 -v the saved selector still resolves to that window' {
+        $selector = New-R9Selector 'Identity' 'server1' 'ssh server1'
+        $snap = (Get-R9Snapshots @((New-R9Acquired 31 @('ssh server1 -v'))) @() $rules)[0]
+        $fact = New-R9Fact 'w31' 31 'ssh server1 -v'
+        $resolution = [TerminalOrganizer.Core.Assignment.ManagerResolver]::Resolve($selector,
+            [TerminalOrganizer.Core.Assignment.WindowFact[]]@($fact), [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($snap))
+        $resolution.Status.ToString() | Should BeExactly 'Resolved'
+        $resolution.WindowId | Should BeExactly 'w31'
+    }
+    It 'a two-session window gets an Identity selector with value YODA1; a partially bound window keeps a Session selector' {
+        $s1 = New-CSession 'YODA1' 'Local' 'wsl.exe -d Ubuntu --exec /home/dev/run_dev_launch.sh --attach YODA1'
+        $s2 = New-CSession 'YODA2' 'Local' 'wsl.exe -d Ubuntu --exec /home/dev/run_dev_launch.sh --attach YODA2'
+        $two = (Get-R9Snapshots @((New-R9Acquired 32 @('OC_YODA1', 'OC_YODA2'))) @($s1, $s2) $rules)[0]
+        $created = [TerminalOrganizer.Core.Assignment.ManagerResolver]::CreateSelector($two, $null)
+        $created.Kind.ToString() | Should BeExactly 'Identity'
+        $created.Value | Should BeExactly 'YODA1'
+        $partial = (Get-R9Snapshots @((New-R9Acquired 33 @('OC_YODA1', 'scratch'))) @($s1) $rules)[0]
+        $createdPartial = [TerminalOrganizer.Core.Assignment.ManagerResolver]::CreateSelector($partial, $null)
+        $createdPartial.Kind.ToString() | Should BeExactly 'Session'
+        $createdPartial.Value | Should BeExactly 'YODA1'
+    }
+    It 'an Identity override row ranks W-SSH 600 as manual, survives a save and reload with kind Identity, and a RawTitle row still matches by raw title' {
+        $snap = (Get-R9Snapshots @((New-R9Acquired 34 @('ssh server1'))) @() $rules)[0]
+        $fact = New-R9Fact 'w34' 34 'ssh server1' $true 100 500
+        $row = [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'Identity' 'server1' 'ssh server1'), 600)
+        $world = Get-R9World @($fact) @($snap) @($row) 500
+        $priority = Get-R9Priority $world 'w34'
+        $priority.Rank | Should Be 600
+        $priority.Source.ToString() | Should BeExactly 'Manual'
+        $priority.Provenance | Should BeExactly 'manual'
+        $dir = New-R9TempDir
+        try {
+            $store = [TerminalOrganizer.App.SettingsStore]::new((Join-Path $dir 'settings.json'))
+            $store.Save([TerminalOrganizer.App.AppSettings]::new('Ctrl+Alt+O', 'test.log', $null, $false, $true, $false,
+                $null, [TerminalOrganizer.App.PriorityOverride[]]@($row), 3,
+                [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Ask'), $false))
+            $reloaded = $store.Load()
+            @($reloaded.PriorityOverrides).Count | Should Be 1
+            $reloaded.PriorityOverrides[0].Selector.Kind.ToString() | Should BeExactly 'Identity'
+            $reloaded.PriorityOverrides[0].Rank | Should Be 600
+        }
+        finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+        $rawRow = [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'RawTitle' 'ssh server1' 'ssh server1'), 650)
+        $rawWorld = Get-R9World @($fact) @($snap) @($rawRow) 500
+        (Get-R9Priority $rawWorld 'w34').Rank | Should Be 650
+    }
+    It 'Identity is the last selector kind and the canonical order of Session, UserLabel and RawTitle rows is unchanged' {
+        $names = [Enum]::GetNames([TerminalOrganizer.Core.Assignment.ManagerSelectorKind])
+        $names[$names.Count - 1] | Should BeExactly 'Identity'
+        ($names[0..3] -join ',') | Should BeExactly 'None,Session,UserLabel,RawTitle'
+        $rowsIn = @(
+            [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'RawTitle' 'b' 'b'), 1),
+            [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'Identity' 'a' 'a'), 2),
+            [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'Session' 'c' 'c'), 3),
+            [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'UserLabel' 'd' 'd'), 4)
+        )
+        $sorted = [TerminalOrganizer.App.SettingsStore]::NormalizeOverrides([TerminalOrganizer.App.PriorityOverride[]]$rowsIn)
+        (($sorted | ForEach-Object { $_.Selector.Kind.ToString() }) -join ',') | Should BeExactly 'Session,UserLabel,RawTitle,Identity'
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-004 labeled windows' {
+    $rules = New-R9Rules
+    $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+    $apply = $composition.GetMethod('ApplyLabels', [Reflection.BindingFlags]'NonPublic,Static')
+    $wl = New-CSession 'YODA1' 'Local' $script:R9YodaCmd
+
+    It 'the overlay rebuilds a labeled window with identity = label, a synthetic session without a command line, and the rule outcome carried through' {
+        $acq = @((New-R9Acquired 41 @('powershell')), (New-R9Acquired 42 @('Untitled tab')), (New-R9Acquired 43 @('1000-big')), (New-R9Acquired 44 @('OC_YODA1')))
+        $snaps = Get-R9Snapshots $acq @($wl) $rules
+        $labels = [TerminalOrganizer.App.LabelRegistry]::new()
+        $labels.SetLabel([IntPtr]41, 'scratch')
+        $labels.SetLabel([IntPtr]42, 'notes')
+        $labels.SetLabel([IntPtr]43, 'bigjob')
+        $labels.SetLabel([IntPtr]44, 'relabel')
+        $shots = $apply.Invoke($null, [object[]]@([TerminalOrganizer.Core.Windows.WindowSnapshot[]]$snaps, $labels))
+        $ps = $shots[0]; $notes = $shots[1]; $big = $shots[2]; $yoda = $shots[3]
+        $ps.IdentityName | Should BeExactly 'scratch'
+        $ps.Identified | Should Be $true
+        $ps.Mergeable | Should Be $false
+        $ps.Tabs[0].Session.CommandLine | Should BeNullOrEmpty
+        $ps.RuleRank | Should Be 200
+        $ps.RuleReference | Should BeExactly 'rule 1: PowerShell*'
+        $ps.HasRuleOutcome | Should Be $true
+        $notes.IdentityName | Should BeExactly 'notes'
+        $notes.RuleRank | Should BeNullOrEmpty
+        $notes.RuleReference | Should BeNullOrEmpty
+        $big.IdentityName | Should BeExactly 'bigjob'
+        $big.RuleRank | Should BeNullOrEmpty
+        $big.RuleReference | Should BeExactly 'rule 3: regex:^(?<rank>[0-9]{1,4})-(?<name>.+)$'
+        # W-L has canonical session evidence and is not relabeled.
+        $yoda.IdentityName | Should BeExactly 'YODA1'
+        $yoda.Tabs[0].Session.CommandLine | Should BeExactly $script:R9YodaCmd
+    }
+    It 'labeled windows rank by rule rank first, then the 300 label step' {
+        $acq = @((New-R9Acquired 41 @('powershell')), (New-R9Acquired 42 @('Untitled tab')), (New-R9Acquired 43 @('1000-big')))
+        $snaps = Get-R9Snapshots $acq @() $rules
+        $labels = [TerminalOrganizer.App.LabelRegistry]::new()
+        $labels.SetLabel([IntPtr]41, 'scratch')
+        $labels.SetLabel([IntPtr]42, 'notes')
+        $labels.SetLabel([IntPtr]43, 'bigjob')
+        $shots = $apply.Invoke($null, [object[]]@([TerminalOrganizer.Core.Windows.WindowSnapshot[]]$snaps, $labels))
+        $facts = @((New-R9Fact 'wps' 41 'powershell' $true 100 500), (New-R9Fact 'wnotes' 42 'Untitled tab' $true 100 600), (New-R9Fact 'wbig' 43 '1000-big' $true 100 700))
+        $world = Get-R9World $facts @($shots) @() 450
+        $ps = Get-R9Priority $world 'wps'
+        $ps.Rank | Should Be 200
+        $ps.Source.ToString() | Should BeExactly 'Declared'
+        $ps.Provenance | Should BeExactly 'rule 1: PowerShell*'
+        $notes = Get-R9Priority $world 'wnotes'
+        $notes.Rank | Should Be 300
+        $big = Get-R9Priority $world 'wbig'
+        $big.Rank | Should Be 300
+        $big.Provenance | Should Match 'matched rule 3:'
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-005 priority wiring end to end' {
+    $rules = New-R9Rules
+    $wl = New-CSession 'YODA1' 'Local' $script:R9YodaCmd
+    function New-R9OverflowFixture {
+        $acq = @((New-R9Acquired 51 @('OC_YODA1')), (New-R9Acquired 52 @('powershell')), (New-R9Acquired 53 @('ssh server1')), (New-R9Acquired 54 @('Untitled tab')))
+        $snaps = Get-R9Snapshots $acq @($wl) $rules
+        $facts = @(
+            (New-R9Fact 'wl' 51 'OC_YODA1' $true 0 0 960 1040),
+            (New-R9Fact 'wps' 52 'powershell' $true 100 500),
+            (New-R9Fact 'wssh' 53 'ssh server1' $true 100 600),
+            (New-R9Fact 'wut' 54 'Untitled tab' $true 100 700))
+        @{ Snaps = $snaps; Facts = $facts }
+    }
+
+    It 'the composer with a default rank resolves W-PS 200 and W-SSH 400 as Declared, Untitled tab 450 as Derived, W-L as a stable occupant, and plans the single move for Untitled tab' {
+        $fx = New-R9OverflowFixture
+        $world = Get-R9World $fx.Facts $fx.Snaps @() 450
+        $ps = Get-R9Priority $world 'wps'
+        $ps.Rank | Should Be 200
+        $ps.Source.ToString() | Should BeExactly 'Declared'
+        $ssh = Get-R9Priority $world 'wssh'
+        $ssh.Rank | Should Be 400
+        $ssh.Source.ToString() | Should BeExactly 'Declared'
+        $ut = Get-R9Priority $world 'wut'
+        $ut.Rank | Should Be 450
+        $ut.Source.ToString() | Should BeExactly 'Derived'
+        $ut.Provenance | Should BeExactly 'default'
+        $lw = Get-R9Priority $world 'wl'
+        $lw.Immovable | Should Be $true
+        $lw.ImmovableReason | Should BeExactly 'stable occupant'
+        @($world.Plan.Moves).Count | Should Be 1
+        $world.Plan.Moves[0].WindowId | Should BeExactly 'wut'
+        $world.Plan.Moves[0].PriorityReason | Should BeExactly 'derived rank 450'
+    }
+    It 'the organize controller builds the same plan when its world capture carries the default rank' {
+        $fx = New-R9OverflowFixture
+        $script:R9Fx = $fx
+        $zones1 = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 0, 0, 960, 1040))
+        $zones2 = [TerminalOrganizer.Core.Geometry.Zone[]]@([TerminalOrganizer.Core.Geometry.Zone]::new(0, 1920, 0, 960, 1040))
+        $script:R9Z1 = $zones1
+        $script:R9Z2 = $zones2
+        $desktop = [TerminalOrganizer.App.CurrentDesktopSource] { '{00000000-0000-4000-8000-000000000009}' }
+        $layout = [TerminalOrganizer.App.LayoutResolution] {
+            param($monitor, $d)
+            $z = if ($monitor.Number -eq 2) { $script:R9Z2 } else { $script:R9Z1 }
+            [TerminalOrganizer.Core.Layouts.LayoutResult]::Supported('grid', $null, 0, $z, @())
+        }
+        $disc = [TerminalOrganizer.App.WindowDiscovery] {
+            param($monitor, $d)
+            New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList ([TerminalOrganizer.Core.Assignment.WindowFact[]]$script:R9Fx.Facts), ([TerminalOrganizer.Core.Windows.WindowSnapshot[]]$script:R9Fx.Snaps)
+        }
+        $assign = [TerminalOrganizer.Core.Overflow.AssignmentComputation] {
+            param($zones, $facts, $manager)
+            [TerminalOrganizer.Core.Assignment.ZoneAssigner]::Assign($zones, $facts, $manager)
+        }
+        $merge = [TerminalOrganizer.App.MergePlanning] { param($plan, $snaps) [TerminalOrganizer.Core.Overflow.MergePlanner]::Plan($plan, $snaps) }
+        $probe = [TerminalOrganizer.App.HelperExistsProbe] { param($m) $true }
+        $exec = [TerminalOrganizer.Core.Overflow.MergeExecution] { param($m) [TerminalOrganizer.Core.Overflow.MergeOutcome]::Merged($m.SourceWindowId) }
+        $place = [TerminalOrganizer.Core.Overflow.PlacementPass] { param($p) @() }
+        $notice = [TerminalOrganizer.App.NoticeSink] { param($t) }
+        $world = [TerminalOrganizer.App.OverflowWorldCapture] {
+            param($target, $d)
+            $row = [TerminalOrganizer.App.CapturedMonitorRow]::new($script:R9Mon2, $script:R9Z2, 'M2',
+                (New-Object TerminalOrganizer.App.DiscoveredWindows -ArgumentList @(), @()))
+            [TerminalOrganizer.App.CapturedOverflowWorld]::new([TerminalOrganizer.App.CapturedMonitorRow[]]@($row),
+                [TerminalOrganizer.App.PriorityOverride[]]@(), 450)
+        }
+        $controller = New-Object TerminalOrganizer.App.OrganizeController -ArgumentList `
+            $desktop, $layout, $disc, $assign, $merge, $probe, $exec, $place, $notice, ([TerminalOrganizer.App.LabelRegistry]::new()), $null, `
+            $null, $null, $null, $world, $null
+        $prepared = $controller.Prepare($script:R9Mon1, $null, $false, 'M1', $null, $null, [System.Threading.CancellationToken]::None)
+        @($prepared.Plan.RedistributionPlan.Moves).Count | Should Be 1
+        $prepared.Plan.RedistributionPlan.Moves[0].WindowId | Should BeExactly 'wut'
+        $prepared.Plan.RedistributionPlan.Moves[0].PriorityReason | Should BeExactly 'derived rank 450'
+    }
+    It 'a world capture without a default rank keeps 500 and a snapshot built through today''s constructor keeps its title-parsed rank' {
+        $lgFact = New-CFact 'LG' -Top 500 -Left 100
+        $legacy = New-CSnap 'LG' @('OC9_R9') @((New-CSession 'R9' 'Local' 'wsl.exe -d Ubuntu --exec r9.sh')) $true $true
+        $legacy.HasRuleOutcome | Should Be $false
+        $world3 = [TerminalOrganizer.App.CapturedOverflowWorld]::new([TerminalOrganizer.App.CapturedMonitorRow[]]@(), [TerminalOrganizer.App.PriorityOverride[]]@())
+        $world3.DefaultRank | Should Be 500
+        $world = Get-R9World @($lgFact) @($legacy) @() 450
+        $p = Get-R9Priority $world 'LG'
+        $p.Rank | Should Be 9
+        $p.Reason | Should BeExactly 'declared'
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-015 organize run pins the manager by identity' {
+    $rules = New-R9Rules
+    It 'the 7-parameter Run pins W-SSH after its title changed, with no window-not-found skip' {
+        $h = New-CController
+        $fact = New-CFact 'ssh server1 -v' -Top 100 -Left 100
+        $snap = (Get-R9Snapshots @((New-R9Acquired ([long]$script:CHandles['ssh server1 -v'].ToInt64()) @('ssh server1 -v'))) @() $rules)[0]
+        $script:CFacts = @($fact)
+        $script:CSnaps = @($snap)
+        $selector = New-R9Selector 'Identity' 'server1' 'ssh server1'
+        $result = $h.Controller.Run((New-TMonitor 1), 'ssh server1', $false, 'M1', $null, [System.Threading.CancellationToken]::None, $selector)
+        $result.Completed | Should Be $true
+        $result.FinalPlan.ManagerPinned | Should Be $true
+        $result.FinalPlan.ManagerWindowId | Should BeExactly 'ssh server1 -v'
+        (@($script:Notices | Where-Object { $_ -like '*not open*' })).Count | Should Be 0
+    }
+    It 'with no window carrying identity server1 the run falls back to raw-title matching and reports today''s skip reason' {
+        $h = New-CController
+        $fact = New-CFact 'other window' -Top 100 -Left 100
+        $snap = (Get-R9Snapshots @((New-R9Acquired ([long]$script:CHandles['other window'].ToInt64()) @('other window'))) @() $rules)[0]
+        $script:CFacts = @($fact)
+        $script:CSnaps = @($snap)
+        $selector = New-R9Selector 'Identity' 'server1' 'ssh server1'
+        $result = $h.Controller.Run((New-TMonitor 1), 'ssh server1', $false, 'M1', $null, [System.Threading.CancellationToken]::None, $selector)
+        $result.FinalPlan.ManagerPinned | Should Be $false
+        (@($script:Notices | Where-Object { $_ -like '*ssh server1*not open*' })).Count | Should Be 1
+    }
+    It 'the 10-parameter RunWithChoice resolves the selector like the 7-parameter Run' {
+        $h = New-CController
+        $fact = New-CFact 'ssh server1 -v' -Top 100 -Left 100
+        $snap = (Get-R9Snapshots @((New-R9Acquired ([long]$script:CHandles['ssh server1 -v'].ToInt64()) @('ssh server1 -v'))) @() $rules)[0]
+        $script:CFacts = @($fact)
+        $script:CSnaps = @($snap)
+        $selector = New-R9Selector 'Identity' 'server1' 'ssh server1'
+        $result = $h.Controller.RunWithChoice((New-TMonitor 1), 'ssh server1', 'M1', $null,
+            [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Stack'),
+            $false, $null, $null, [System.Threading.CancellationToken]::None, $selector)
+        $result.FinalPlan.ManagerPinned | Should Be $true
+    }
+    It 'the menu resolution and the run name the same manager window' {
+        $selector = New-R9Selector 'Identity' 'server1' 'ssh server1'
+        $snap = (Get-R9Snapshots @((New-R9Acquired 61 @('ssh server1 -v'))) @() $rules)[0]
+        $fact = New-R9Fact 'w61' 61 'ssh server1 -v'
+        $menu = [TerminalOrganizer.Core.Assignment.ManagerResolver]::Resolve($selector,
+            [TerminalOrganizer.Core.Assignment.WindowFact[]]@($fact), [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($snap))
+        $menu.WindowId | Should BeExactly 'w61'
+    }
+}
+
+# --- SPEC-RULES-009 M3: menu provenance rows and the tools ---
+# Expected values come from SPEC-RULES-009 acceptance.md and plan.md section J.4, never from the code under test.
+
+$script:R9Dot = ' ' + [string][char]0x00B7 + ' '
+$script:R9Ellipsis = [string][char]0x2026
+
+function Get-R9LabelRoot($Snaps, $Overrides = @(), [int]$DefaultRank = 500) {
+    $texts = [TerminalOrganizer.App.RuleProvenance]::RowTexts(
+        [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($Snaps),
+        [TerminalOrganizer.App.PriorityOverride[]]@($Overrides), $DefaultRank)
+    $state = [TerminalOrganizer.App.TrayMenuState]::new($false, 'Ctrl+Alt+O',
+        [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($script:R9Mon1),
+        [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($Snaps),
+        [TerminalOrganizer.Core.Assignment.ManagerSelector]::None(), $null, $null, $false,
+        [TerminalOrganizer.App.OverflowPolicy]::Parse([TerminalOrganizer.App.OverflowPolicy], 'Ask'),
+        [string[]]@($texts))
+    $entries = [TerminalOrganizer.App.TrayMenuBuilder]::Build($state)
+    @($entries | Where-Object { $_.Kind.ToString() -eq 'LabelsAndPrioritiesRoot' })[0]
+}
+
+Describe 'SPEC-RULES-009 AC-010 menu rows' {
+    $rules = New-R9Rules
+    $wl = New-CSession 'YODA1' 'Local' $script:R9YodaCmd
+
+    It 'Labels and priorities lists the three pinned rows, W-PS and W-SSH enabled and W-L disabled' {
+        $acq = @((New-R9Acquired 71 @('powershell')), (New-R9Acquired 72 @('OC_YODA1')), (New-R9Acquired 73 @('ssh server1')))
+        $snaps = Get-R9Snapshots $acq @($wl) $rules
+        $root = Get-R9LabelRoot $snaps
+        $root.Enabled | Should Be $true
+        @($root.Children).Count | Should Be 3
+        $root.Children[0].Label | Should BeExactly ('powershell' + $script:R9Dot + 'rank 200' + $script:R9Dot + 'rule 1: PowerShell*')
+        $root.Children[1].Label | Should BeExactly ('OC_YODA1 (as YODA1)' + $script:R9Dot + 'rank 300' + $script:R9Dot + 'session Local (matched preset launcher-prefix)')
+        $root.Children[2].Label | Should BeExactly ('ssh server1 (as server1)' + $script:R9Dot + 'rank 400' + $script:R9Dot + 'rule 2: regex:^ssh (?<name>[^ ]+)')
+        $root.Children[0].Enabled | Should Be $true
+        $root.Children[1].Enabled | Should Be $false
+        $root.Children[2].Enabled | Should Be $true
+    }
+    It 'a provenance longer than 80 characters is cut to its first 79 characters plus an ellipsis' {
+        $x80 = 'x' * 80
+        $long = New-R9Rules $false ('{"match":"regex:^' + $x80 + '$","rank":100}')
+        $snap = (Get-R9Snapshots @((New-R9Acquired 74 @($x80))) @() $long)[0]
+        $snap.RuleReference.Length | Should Be 96
+        $root = Get-R9LabelRoot @($snap)
+        $expectedProvenance = 'rule 1: regex:^' + ('x' * 64) + $script:R9Ellipsis
+        $expectedProvenance.Length | Should Be 80
+        $root.Children[0].Label | Should BeExactly ($x80 + $script:R9Dot + 'rank 100' + $script:R9Dot + $expectedProvenance)
+    }
+    It 'a provenance of exactly 80 characters is not cut' {
+        $x = 'x' * 64
+        $rule = New-R9Rules $false ('{"match":"regex:^' + $x + '$","rank":100}')
+        $snap = (Get-R9Snapshots @((New-R9Acquired 75 @($x))) @() $rule)[0]
+        $snap.RuleReference.Length | Should Be 80
+        $root = Get-R9LabelRoot @($snap)
+        $root.Children[0].Label | Should BeExactly ($x + $script:R9Dot + 'rank 100' + $script:R9Dot + $snap.RuleReference)
+    }
+    It 'no menu entry kind edits rules' {
+        @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]) | Where-Object { $_ -match 'Rule' }).Count | Should Be 0
+    }
+    It 'the existing constructors still list only unidentified windows as label rows' {
+        $acq = @((New-R9Acquired 76 @('powershell')), (New-R9Acquired 77 @('OC_YODA1')))
+        $snaps = Get-R9Snapshots $acq @($wl) $rules
+        $state = [TerminalOrganizer.App.TrayMenuState]::new($false, 'Ctrl+Alt+O',
+            [TerminalOrganizer.Core.Monitors.MonitorInfo[]]@($script:R9Mon1), [TerminalOrganizer.Core.Windows.WindowSnapshot[]]$snaps,
+            [TerminalOrganizer.Core.Assignment.ManagerSelector]::None(), $null, $null, $false)
+        $entries = [TerminalOrganizer.App.TrayMenuBuilder]::Build($state)
+        $root = @($entries | Where-Object { $_.Kind.ToString() -eq 'LabelsAndPrioritiesRoot' })[0]
+        @($root.Children).Count | Should Be 1
+        $root.Children[0].Label | Should BeExactly 'powershell'
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-004 labeled rows' {
+    $rules = New-R9Rules
+    $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+    $apply = $composition.GetMethod('ApplyLabels', [Reflection.BindingFlags]'NonPublic,Static')
+    $wl = New-CSession 'YODA1' 'Local' $script:R9YodaCmd
+
+    It 'labeled windows render the label step, stay enabled, and W-L is not relabeled' {
+        $acq = @((New-R9Acquired 81 @('powershell')), (New-R9Acquired 82 @('Untitled tab')), (New-R9Acquired 83 @('1000-big')), (New-R9Acquired 84 @('OC_YODA1')))
+        $snaps = Get-R9Snapshots $acq @($wl) $rules
+        $labels = [TerminalOrganizer.App.LabelRegistry]::new()
+        $labels.SetLabel([IntPtr]81, 'scratch')
+        $labels.SetLabel([IntPtr]82, 'notes')
+        $labels.SetLabel([IntPtr]83, 'bigjob')
+        $labels.SetLabel([IntPtr]84, 'relabel')
+        $shots = $apply.Invoke($null, [object[]]@([TerminalOrganizer.Core.Windows.WindowSnapshot[]]$snaps, $labels))
+        $root = Get-R9LabelRoot $shots
+        @($root.Children).Count | Should Be 4
+        $root.Children[0].Label | Should BeExactly ('powershell (as scratch)' + $script:R9Dot + 'rank 200' + $script:R9Dot + 'rule 1: PowerShell*')
+        $root.Children[1].Label | Should BeExactly ('Untitled tab (as notes)' + $script:R9Dot + 'rank 300' + $script:R9Dot + 'label')
+        $root.Children[2].Label | Should BeExactly ('1000-big (as bigjob)' + $script:R9Dot + 'rank 300' + $script:R9Dot + 'label (matched rule 3: regex:^(?<rank>[0-9]{1,4})-(?<name>.+)$)')
+        $root.Children[3].Label | Should BeExactly ('OC_YODA1 (as YODA1)' + $script:R9Dot + 'rank 300' + $script:R9Dot + 'session Local (matched preset launcher-prefix)')
+        $root.Children[0].Enabled | Should Be $true
+        $root.Children[1].Enabled | Should Be $true
+        $root.Children[2].Enabled | Should Be $true
+        $root.Children[3].Enabled | Should Be $false
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-005 menu and redistribution agree for movable windows' {
+    $rules = New-R9Rules
+    $wl = New-CSession 'YODA1' 'Local' $script:R9YodaCmd
+    It 'the menu rows carry the ranks used for redistribution; W-L shows 300 while it is immovable' {
+        $acq = @((New-R9Acquired 91 @('OC_YODA1')), (New-R9Acquired 92 @('powershell')), (New-R9Acquired 93 @('ssh server1')), (New-R9Acquired 94 @('Untitled tab')))
+        $snaps = Get-R9Snapshots $acq @($wl) $rules
+        $facts = @(
+            (New-R9Fact 'wl' 91 'OC_YODA1' $true 0 0 960 1040),
+            (New-R9Fact 'wps' 92 'powershell' $true 100 500),
+            (New-R9Fact 'wssh' 93 'ssh server1' $true 100 600),
+            (New-R9Fact 'wut' 94 'Untitled tab' $true 100 700))
+        $world = Get-R9World $facts $snaps @() 450
+        $texts = [TerminalOrganizer.App.RuleProvenance]::RowTexts([TerminalOrganizer.Core.Windows.WindowSnapshot[]]$snaps, [TerminalOrganizer.App.PriorityOverride[]]@(), 450)
+        $texts.Count | Should Be 4
+        $texts[0] | Should Match 'rank 300'
+        (Get-R9Priority $world 'wl').Immovable | Should Be $true
+        $ids = @('wl', 'wps', 'wssh', 'wut')
+        for ($i = 1; $i -lt 4; $i++) {
+            $p = Get-R9Priority $world $ids[$i]
+            $texts[$i] | Should Match ('rank ' + $p.Rank + ' ')
+        }
+        $texts[3] | Should BeExactly ('Untitled tab' + $script:R9Dot + 'rank 450' + $script:R9Dot + 'default')
+    }
+    It 'a manual Identity override shows rank and the manual provenance in the menu row' {
+        $snap = (Get-R9Snapshots @((New-R9Acquired 95 @('ssh server1'))) @() $rules)[0]
+        $row = [TerminalOrganizer.App.PriorityOverride]::new((New-R9Selector 'Identity' 'server1' 'ssh server1'), 600)
+        $texts = [TerminalOrganizer.App.RuleProvenance]::RowTexts([TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($snap), [TerminalOrganizer.App.PriorityOverride[]]@($row), 500)
+        $texts[0] | Should BeExactly ('ssh server1 (as server1)' + $script:R9Dot + 'rank 600' + $script:R9Dot + 'manual')
+    }
+}
+
+Describe 'SPEC-RULES-009 AC-011 tools compose with rules at every site' {
+    $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    foreach ($toolName in @('organize-dryrun.ps1', 'organize-once.ps1')) {
+        $tool = Join-Path $repoRoot ('tools\' + $toolName)
+        It ($toolName + ' -SelfTest runs the line check and the preview check and exits 0') {
+            $out = & $ps51 -NoProfile -ExecutionPolicy Bypass -File $tool -SelfTest
+            $LASTEXITCODE | Should Be 0
+            (@($out | Where-Object { $_ -like 'FAIL: *' }).Count) | Should Be 0
+            (@($out | Where-Object { $_ -eq 'PASS: ac011/lines' }).Count) | Should Be 1
+            (@($out | Where-Object { $_ -eq 'PASS: ac011/preview' }).Count) | Should Be 1
+        }
+        It ($toolName + ' stays pure ASCII and carries no second provenance formatter') {
+            $text = [IO.File]::ReadAllText($tool)
+            ($text -match '[^\x00-\x7F]') | Should Be $false
+            $text.Contains('RuleProvenance') | Should Be $true
+            $text.Contains('Compose($acquired, $sessions)') | Should Be $false
+            $text.Contains('ManagerStore') | Should Be $false
+        }
+    }
+    It 'organize-once calls the 7-parameter Run overload at both run sites' {
+        $text = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\organize-once.ps1'))
+        ([regex]::Matches($text, '\$controller\.Run\(\$chosen, \$managerName, \$false, \$null, \$null, \[System\.Threading\.CancellationToken\]::None, \$selector\)')).Count | Should Be 2
+    }
+}
+
+# --- SPEC-RULES-009 M4: README title-rules section (AC-013) ---
+# The five example rules are the verbatim lines of plan.md section J.5.
+
+Describe 'SPEC-RULES-009 AC-013 README' {
+    $readme = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
+    $startMarker = '### Title rules'
+    $startIndex = $readme.IndexOf($startMarker)
+    $endIndex = if ($startIndex -ge 0) { $readme.IndexOf("`n### ", $startIndex + 5) } else { -1 }
+    $section = if ($startIndex -ge 0 -and $endIndex -gt $startIndex) { $readme.Substring($startIndex, $endIndex - $startIndex) } else { '' }
+
+    It 'the old priority-channel heading is gone and a title-rules section stands in its place' {
+        $readme.Contains('### Window titles as the priority channel') | Should Be $false
+        $startIndex | Should BeGreaterThan -1
+        $section.Length | Should BeGreaterThan 200
+        # In its place: after the tray menu section and before the overflow section.
+        $readme.IndexOf('### The tray menu') | Should BeLessThan $startIndex
+        $readme.IndexOf("### When windows don't all fit") | Should BeGreaterThan $startIndex
+    }
+    It 'the section carries the five pinned example rules verbatim' {
+        $section.Contains('{ "match": "PowerShell*", "rank": 200 }') | Should Be $true
+        $section.Contains('{ "match": "regex:^[A-Z]:", "rank": 150 }') | Should Be $true
+        $section.Contains('{ "match": "regex:^(?<rank>[0-9]{1,3})-(?<name>.+)$" }') | Should Be $true
+        $section.Contains('{ "marker": "#" }') | Should Be $true
+        $section.Contains('{ "match": "*--attach YODA*", "on": "commandline", "rank": 250 }') | Should Be $true
+    }
+    It 'the section names the preset, the precedence order and the caveats' {
+        $section.Contains('launcher-prefix') | Should Be $true
+        $section | Should Match '(?i)precedence'
+        $section | Should Match '(?i)a renamed window is a new identity'
+        $section | Should Match '(?i)plain PowerShell, cmd and ssh windows have no command line to match'
+        $section | Should Match '(?i)settings file.*(missing|reset).*(preset is off|preset off|starts with the preset off)|(missing|reset).*settings file.*preset'
+    }
+    It 'Known limitations gains one bullet stating that identity follows the window title' {
+        $limits = $readme.Substring($readme.IndexOf('## Known limitations'))
+        $limits = $limits.Substring(0, $limits.IndexOf('## License'))
+        @($limits -split "`n" | Where-Object { $_ -match '^- ' -and $_ -match '(?i)identity follows the window title' }).Count | Should Be 1
     }
 }
