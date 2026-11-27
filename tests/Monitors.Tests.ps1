@@ -1348,3 +1348,364 @@ Describe 'SPEC-MON-011 AC-014 dump-monitors tool' {
         finally { Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-012 M1: the hint carries the desktop of its log line (REQ-DSK-001; AC-003).
+# Expected values are pinned by hand from spec.md section 3.2; none is computed by the code under test.
+# ---------------------------------------------------------------------------
+Describe 'SPEC-MON-012 AC-003 The hint carries the desktop' {
+    It 'the newer of two lines of ID-4352 (older D1 (2, D2U), newer D2 (1, EHU)) gives the hint (1, EHU) with the desktop D2' {
+        $older = New-InitLine $SF_ID $SF_INST_4352 '2' $SF_D2U $SF_DESK1
+        $newer = New-InitLine $SF_ID $SF_INST_4352 '1' $SF_EHU $SF_DESK2
+        $h = Find-Hint (($older, $newer) -join "`r`n") $SF_ID $SF_INST_4352
+        (Get-HintText $h) | Should BeExactly '1|XPG0H42JBEHU'
+        $h.Desktop | Should BeExactly $SF_DESK2
+        ([Guid]$h.Desktop).Equals([Guid]$SF_DESK2) | Should Be $true
+    }
+
+    It 'the two real lines of LOG-REAL each carry the desktop {44CD2EF4-27B1-40A7-8549-DD8033C09F8F}' {
+        $text = (($LOG_REAL_4358, $LOG_REAL_4352) -join "`r`n") + "`r`n"
+        (Find-Hint $text $SF_ID $SF_INST_4352).Desktop | Should BeExactly '{44CD2EF4-27B1-40A7-8549-DD8033C09F8F}'
+        (Find-Hint $text $SF_ID $SF_INST_4358).Desktop | Should BeExactly '{44CD2EF4-27B1-40A7-8549-DD8033C09F8F}'
+    }
+
+    It 'a lowercase logged desktop is carried as logged (the comparison by GUID value is the selector job)' {
+        $lower = $SF_DESK1.ToLower()
+        $h = Find-Hint (New-InitLine $SF_ID $SF_INST_4352 '1' $SF_EHU $lower) $SF_ID $SF_INST_4352
+        $h.Desktop | Should BeExactly $lower
+    }
+
+    It 'a newest line with a malformed GUID suffix is ignored and the next older line hint carries that line own desktop' {
+        $valid = New-InitLine $SF_ID $SF_INST_4352 '1' $SF_EHU $SF_DESK1
+        foreach ($badDesk in @('{ZZZZ}', '{9089F388-5216-49EA-9CD4-07E910D817EB', '9089F388-5216-49EA-9CD4-07E910D817EB', '{9089F388-5216-49EA-9CD4-07E910D817E}')) {
+            $bad = New-InitLine $SF_ID $SF_INST_4352 '2' $SF_D2U $badDesk
+            $h = Find-Hint (($valid, $bad) -join "`r`n") $SF_ID $SF_INST_4352
+            (Get-HintText $h) | Should BeExactly '1|XPG0H42JBEHU'
+            $h.Desktop | Should BeExactly $SF_DESK1
+        }
+    }
+
+    It 'FindNewestHint keeps exactly 3 parameters, none named like desktop' {
+        $m = [TerminalOrganizer.Core.Monitors.FancyZonesLogParser].GetMethod('FindNewestHint')
+        $names = @($m.GetParameters() | ForEach-Object { $_.Name })
+        $names.Count | Should Be 3
+        ($names -join ',').ToLower().Contains('desktop') | Should Be $false
+    }
+
+    It 'the reader passes the desktop through together with the file name' {
+        $root = New-TempRoot
+        try {
+            $null = Add-LogFile $root 'v0.102.2862' '2026-10-23' ($RDR_HINT_A + "`r`n")
+            $r = Read-LogHint (Join-Path $root 'Logs')
+            (Get-ResultText $r) | Should BeExactly 'Found|1|XPG0H42JBEHU'
+            $r.Hint.Desktop | Should BeExactly $SF_DESK1
+            $r.Hint.SourceFileName | Should BeExactly 'log_2026-10-23.log'
+        }
+        finally { Remove-TempRoot $root }
+    }
+
+    It 'the midnight case: a line only in the previous-day file gives a hint with that file name and the desktop of its line' {
+        $root = New-TempRoot
+        try {
+            $null = Add-LogFile $root 'v0.102.2862' '2026-10-23' ($LOG_FILLER_LINE + "`r`n")
+            $null = Add-LogFile $root 'v0.102.2862' '2026-10-22' ($RDR_HINT_B + "`r`n")
+            $r = Read-LogHint (Join-Path $root 'Logs')
+            (Get-ResultText $r) | Should BeExactly 'Found|2|XPG0H42JBD2U'
+            $r.Hint.SourceFileName | Should BeExactly 'log_2026-10-22.log'
+            $r.Hint.Desktop | Should BeExactly $SF_DESK2
+        }
+        finally { Remove-TempRoot $root }
+    }
+
+    It 'a hint built with the 2-argument or the 3-argument constructor carries an empty desktop' {
+        $two = New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList 1, $SF_EHU
+        $three = New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList 1, $SF_EHU, 'log_2026-10-23.log'
+        $two.Desktop | Should BeExactly ''
+        $three.Desktop | Should BeExactly ''
+        $three.SourceFileName | Should BeExactly 'log_2026-10-23.log'
+    }
+
+    It 'a hint built with a desktop (4 arguments) returns it, and a null desktop is stored as empty' {
+        $four = New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList 1, $SF_EHU, 'log_2026-10-23.log', $SF_DESK1
+        $four.Number | Should Be 1
+        $four.Serial | Should BeExactly $SF_EHU
+        $four.SourceFileName | Should BeExactly 'log_2026-10-23.log'
+        $four.Desktop | Should BeExactly $SF_DESK1
+        $nul = New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList 1, $SF_EHU, 'log_2026-10-23.log', $null
+        $nul.Desktop | Should BeExactly ''
+    }
+}
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-012 M2: the live-desktop fallback of the hinted selector (REQ-DSK-002..004; AC-004, AC-005, AC-006 enum pin).
+# SF-D1 = rows 0, 1, 2 and 5 of SF-STALE (all on D1), in that relative order; positions: 0 = (UID4352, 2, D2U) stale,
+# 1 = (UID4358, 2, EHU) live, 2 = (UID4352, 1, EHU) live, 3 = (UID4358, 1, D2U) stale. SF-D1-REVERSE lists the same four rows
+# as 5, 2, 1, 0. The hint always comes from FindNewestHint over a two-line log on D1: (1, EHU) for UID4352 and (2, EHU) for
+# UID4358. Every expected position is pinned by hand from spec.md section 3.2; none is computed by the code under test.
+# ---------------------------------------------------------------------------
+$FB_LOG_UPPER = ((New-InitLine $SF_ID $SF_INST_4352 '1' $SF_EHU $SF_DESK1), (New-InitLine $SF_ID $SF_INST_4358 '2' $SF_EHU $SF_DESK1)) -join "`r`n"
+$FB_LOG_LOWER = ((New-InitLine $SF_ID $SF_INST_4352 '1' $SF_EHU $SF_DESK1.ToLower()), (New-InitLine $SF_ID $SF_INST_4358 '2' $SF_EHU $SF_DESK1.ToLower())) -join "`r`n"
+
+# A hint with an explicit desktop (the 4-argument constructor); a $null desktop is stored as empty.
+function New-FbHint([int]$Number, [string]$Serial, [string]$Desktop) {
+    New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList $Number, $Serial, 'log_2026-10-23.log', $Desktop
+}
+
+Describe 'SPEC-MON-012 AC-004 The fallback table' {
+    $sfD1 = Read-Applied (New-SfStaleJson @(0, 1, 2, 5))
+    $sfD1Reverse = Read-Applied (New-SfStaleJson @(5, 2, 1, 0))
+    $cases = @(
+        @{ Label = 'ID-4352 on D2'; Inst = $SF_INST_4352; Desk = $SF_DESK2; Num = 1; Pos = 2; RevPos = 1 },
+        @{ Label = 'ID-4352 on D3'; Inst = $SF_INST_4352; Desk = $SF_DESK3; Num = 1; Pos = 2; RevPos = 1 },
+        @{ Label = 'ID-4358 on D2'; Inst = $SF_INST_4358; Desk = $SF_DESK2; Num = 2; Pos = 1; RevPos = 2 },
+        @{ Label = 'ID-4358 on D3'; Inst = $SF_INST_4358; Desk = $SF_DESK3; Num = 2; Pos = 1; RevPos = 2 }
+    )
+
+    foreach ($c in $cases) {
+        It ('{0}: the hint parsed from the two-line D1 log selects position {1} under LiveDesktopFallback' -f $c.Label, $c.Pos) {
+            $hint = Find-Hint $FB_LOG_UPPER $SF_ID $c.Inst
+            $hint.Desktop | Should BeExactly $SF_DESK1
+            $d = Decide-Hinted $sfD1 (New-SfIdentity $c.Inst) $c.Desk $hint
+            (Get-Pos $d.Entry) | Should Be $c.Pos
+            $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+            (Get-Pos (Select-Hinted $sfD1 (New-SfIdentity $c.Inst) $c.Desk $hint)) | Should Be $c.Pos
+        }
+
+        It ('{0}: the same pick results when the current desktop is the lowercase ToString("B") form' -f $c.Label) {
+            $lower = ([Guid]$c.Desk).ToString('B')
+            $lower | Should BeExactly $c.Desk.ToLower()
+            $d = Decide-Hinted $sfD1 (New-SfIdentity $c.Inst) $lower (Find-Hint $FB_LOG_UPPER $SF_ID $c.Inst)
+            (Get-Pos $d.Entry) | Should Be $c.Pos
+            $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+        }
+
+        It ('{0}: the picked row is the live row (instance, D1, {1}, EHU), whatever the number and serial of the identity' -f $c.Label, $c.Num) {
+            $d = Decide-Hinted $sfD1 (New-SfIdentity $c.Inst) $c.Desk (Find-Hint $FB_LOG_UPPER $SF_ID $c.Inst)
+            (Get-RowId $d.Entry) | Should BeExactly ('{0}|{1}|{2}|{3}' -f $c.Inst, $SF_DESK1, $c.Num, $SF_EHU)
+            $other = New-MonitorIdentity $SF_ID $c.Inst 7 'SOMETHING-ELSE'
+            (Get-RowId (Decide-Hinted $sfD1 $other $c.Desk (Find-Hint $FB_LOG_UPPER $SF_ID $c.Inst)).Entry) | Should BeExactly (Get-RowId $d.Entry)
+        }
+
+        It ('{0}: on SF-D1-REVERSE the pick is position {1} with the same row identity' -f $c.Label, $c.RevPos) {
+            $hint = Find-Hint $FB_LOG_UPPER $SF_ID $c.Inst
+            $d = Decide-Hinted $sfD1Reverse (New-SfIdentity $c.Inst) $c.Desk $hint
+            (Get-Pos $d.Entry) | Should Be $c.RevPos
+            $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+            (Get-RowId $d.Entry) | Should BeExactly ('{0}|{1}|{2}|{3}' -f $c.Inst, $SF_DESK1, $c.Num, $SF_EHU)
+        }
+    }
+
+    It 'a hint desktop logged in lowercase matches the uppercase rows by GUID value: ID-4352 on D3 is position 2 and ID-4358 on D3 is position 1, both under LiveDesktopFallback' {
+        $h4352 = Find-Hint $FB_LOG_LOWER $SF_ID $SF_INST_4352
+        $h4358 = Find-Hint $FB_LOG_LOWER $SF_ID $SF_INST_4358
+        $h4352.Desktop | Should BeExactly '{9089f388-5216-49ea-9cd4-07e910d817eb}'
+        $d = Decide-Hinted $sfD1 (New-SfIdentity $SF_INST_4352) $SF_DESK3 $h4352
+        (Get-Pos $d.Entry) | Should Be 2
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+        $d = Decide-Hinted $sfD1 (New-SfIdentity $SF_INST_4358) $SF_DESK3 $h4358
+        (Get-Pos $d.Entry) | Should Be 1
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+    }
+
+    It 'a lowercase hint desktop with the uppercase current desktop D1 is today result: position 2 under LiveHint, never LiveDesktopFallback' {
+        $d = Decide-Hinted $sfD1 (New-SfIdentity $SF_INST_4352) $SF_DESK1 (Find-Hint $FB_LOG_LOWER $SF_ID $SF_INST_4352)
+        (Get-Pos $d.Entry) | Should Be 2
+        $d.Rule.ToString() | Should BeExactly 'LiveHint'
+    }
+
+    It 'no fallback selection mutates the document: the entry count and the order stay the same' {
+        $sfD1.Entries.Length | Should Be 4
+        $before = ($sfD1.Entries | ForEach-Object { $_.Position }) -join ','
+        foreach ($c in $cases) {
+            $null = Decide-Hinted $sfD1 (New-SfIdentity $c.Inst) $c.Desk (Find-Hint $FB_LOG_UPPER $SF_ID $c.Inst)
+        }
+        $sfD1.Entries.Length | Should Be 4
+        (($sfD1.Entries | ForEach-Object { $_.Position }) -join ',') | Should BeExactly $before
+        $before | Should BeExactly '0,1,2,3'
+    }
+}
+
+# Guards: the hint-desktop step does not apply (REQ-DSK-003). These rows characterise the behaviour of the existing order and are
+# expected GREEN on their first run; the mutation probe of progress.md section E.2 shows which of them turn RED under which
+# change of the hint-desktop step. Revision 0.2.0: cases (a1), (a2) and (d2) are new; (a1) and (a2) replace the 0.1.x cases (a),
+# which pinned the order the revision removes (the AC-004 rows p1 to p3 pin the new picks for those inputs).
+Describe 'SPEC-MON-012 AC-005 The hint-desktop step does not apply' {
+    $sfD1 = Read-Applied (New-SfStaleJson @(0, 1, 2, 5))
+    $id4352 = New-SfIdentity $SF_INST_4352
+    $hintD1 = New-FbHint 1 $SF_EHU $SF_DESK1
+
+    It '(a1) the hint desktop D1 has no pair row: the eight SF-STALE rows that are not on D1 (original rows 3, 4, 6, 7, 8, 9, 10, 11) with ID-4352 on D3 and the hint (1, EHU, D1) give position 6 under LiveHint (the live D3 row; the stale D3 row at position 5 is not chosen)' {
+        $notD1 = Read-Applied (New-SfStaleJson @(3, 4, 6, 7, 8, 9, 10, 11))
+        $d = Decide-Hinted $notD1 $id4352 $SF_DESK3 $hintD1
+        (Get-Pos $d.Entry) | Should Be 6
+        $d.Rule.ToString() | Should BeExactly 'LiveHint'
+    }
+
+    It '(a2) the hint desktop D1 has no row at all: a document holding only the stale row (UID4352, 2, D2U) on D3, with the same hint, gives position 0 under HintUnmatched' {
+        $onlyStale = Read-Applied (New-SfStaleJson @(9))
+        $d = Decide-Hinted $onlyStale $id4352 $SF_DESK3 $hintD1
+        (Get-Pos $d.Entry) | Should Be 0
+        $d.Rule.ToString() | Should BeExactly 'HintUnmatched'
+    }
+
+    It '(b) a null hint gives DocumentOrder and a null entry on SF-D1 for D3' {
+        $d = Decide-Hinted $sfD1 $id4352 $SF_DESK3 $null
+        ($null -eq $d.Entry) | Should Be $true
+        $d.Rule.ToString() | Should BeExactly 'DocumentOrder'
+    }
+
+    It '(c) a hint without a desktop (2-argument form, (1, EHU)) gives a null entry under HintUnmatched' {
+        $d = Decide-Hinted $sfD1 $id4352 $SF_DESK3 (New-Hint 1 $SF_EHU)
+        ($null -eq $d.Entry) | Should Be $true
+        $d.Rule.ToString() | Should BeExactly 'HintUnmatched'
+    }
+
+    It '(d) a hint (3, S9) whose desktop equals the current desktop D1, for ID-4352 on SF-D1, gives the 3-argument result (position 0) under HintUnmatched' {
+        $d = Decide-Hinted $sfD1 $id4352 $SF_DESK1 (New-FbHint 3 'S9' $SF_DESK1)
+        (Get-Pos $d.Entry) | Should Be 0
+        $d.Rule.ToString() | Should BeExactly 'HintUnmatched'
+    }
+
+    It '(d2) the hint (1, EHU, D1) for ID-4352 on SF-D1 with the current desktop D1 gives position 2 under LiveHint, never LiveDesktopFallback (the hint desktop equals the current desktop)' {
+        $d = Decide-Hinted $sfD1 $id4352 $SF_DESK1 $hintD1
+        (Get-Pos $d.Entry) | Should Be 2
+        $d.Rule.ToString() | Should BeExactly 'LiveHint'
+    }
+
+    It '(e) a hint (3, S9) with desktop D1 for ID-4352 on D3 gives a null entry under HintUnmatched (no row carries the pair)' {
+        $d = Decide-Hinted $sfD1 $id4352 $SF_DESK3 (New-FbHint 3 'S9' $SF_DESK1)
+        ($null -eq $d.Entry) | Should Be $true
+        $d.Rule.ToString() | Should BeExactly 'HintUnmatched'
+    }
+
+    It '(f) a hint matching only the number or only the serial of a row of D1 gives a null entry under HintUnmatched' {
+        foreach ($partial in @((New-FbHint 1 $SF_D2U $SF_DESK1), (New-FbHint 2 $SF_EHU $SF_DESK1))) {
+            $d = Decide-Hinted $sfD1 $id4352 $SF_DESK3 $partial
+            ($null -eq $d.Entry) | Should Be $true
+            $d.Rule.ToString() | Should BeExactly 'HintUnmatched'
+        }
+    }
+
+    It '(g) a row that carries the hint pair but belongs to another instance is never chosen: only a UID4358 (1, EHU) row on D1 gives ID-4352 on D3 a null entry under HintUnmatched' {
+        $foreignOnly = Read-Applied (New-AppliedDoc @(New-AppliedEntryJson $SF_ID $SF_INST_4358 1 $SF_EHU $SF_DESK1))
+        $d = Decide-Hinted $foreignOnly $id4352 $SF_DESK3 $hintD1
+        ($null -eq $d.Entry) | Should Be $true
+        $d.Rule.ToString() | Should BeExactly 'HintUnmatched'
+    }
+
+    It '(h) a null or empty current desktop with a hint carrying D1 gives the 3-argument result under DocumentOrder' {
+        foreach ($desk in @($null, '')) {
+            $d = Decide-Hinted $sfD1 $id4352 $desk $hintD1
+            (Get-Pos $d.Entry) | Should Be (Get-Pos (Select-Entry $sfD1 $id4352 $desk))
+            $d.Rule.ToString() | Should BeExactly 'DocumentOrder'
+        }
+    }
+}
+
+Describe 'SPEC-MON-012 AC-006 The rule set' {
+    It 'SelectionRule has exactly the four names LiveHint, HintUnmatched, DocumentOrder and LiveDesktopFallback, the first three keeping their numeric values' {
+        $names = @([Enum]::GetNames([TerminalOrganizer.Core.Monitors.SelectionRule]))
+        $names.Count | Should Be 4
+        ($names -join ',') | Should BeExactly 'LiveHint,HintUnmatched,DocumentOrder,LiveDesktopFallback'
+        [int][TerminalOrganizer.Core.Monitors.SelectionRule]::LiveHint | Should Be 0
+        [int][TerminalOrganizer.Core.Monitors.SelectionRule]::HintUnmatched | Should Be 1
+        [int][TerminalOrganizer.Core.Monitors.SelectionRule]::DocumentOrder | Should Be 2
+    }
+}
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-012 revision 0.2.0 M4: the hint desktop's row is tried first (REQ-DSK-002, REQ-DSK-003, REQ-DSK-004; AC-004 rows
+# p1 to p3 and AC-009 selector rows). Hints of p1 to p3 are built with the 4-argument form (no log involved). AC-009 uses EV-8,
+# the eight rows of the live evidence file in document order, all monitor DEL4091: 0 (UID4352, 2, D2U, OM); 1 (UID4352, 2, D2U, OD);
+# 2 (UID4358, 1, D2U, OM); 3 (UID4358, 1, D2U, OD); 4 (UID4358, 2, EHU, OM); 5 (UID4358, 2, EHU, OD); 6 (UID4352, 1, EHU, OM) the
+# leftover; 7 (UID4352, 1, EHU, OD) the live row. OM = SF_DESK1, OD = the desktop FancyZones is keyed to, HOME has no rows.
+# Every expected position is pinned by hand from spec.md section 3.2; none is computed by the code under test.
+# ---------------------------------------------------------------------------
+$FB_OD = '{EBFCC0E3-1642-4EB1-A93F-8B64EDFB20C1}'
+$FB_HOME = '{CF231737-634A-4700-8304-3B2D1909B030}'
+
+function New-FbEv8Doc {
+    Read-Applied (New-AppliedDoc @(
+            (New-AppliedEntryJson $SF_ID $SF_INST_4352 2 $SF_D2U $SF_DESK1),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4352 2 $SF_D2U $FB_OD),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4358 1 $SF_D2U $SF_DESK1),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4358 1 $SF_D2U $FB_OD),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4358 2 $SF_EHU $SF_DESK1),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4358 2 $SF_EHU $FB_OD),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4352 1 $SF_EHU $SF_DESK1),
+            (New-AppliedEntryJson $SF_ID $SF_INST_4352 1 $SF_EHU $FB_OD)))
+}
+
+$FB_LOG_OD = ((New-InitLine $SF_ID $SF_INST_4352 '1' $SF_EHU $FB_OD), (New-InitLine $SF_ID $SF_INST_4358 '2' $SF_EHU $FB_OD)) -join "`r`n"
+
+Describe 'SPEC-MON-012 AC-004 The hint desktop row is preferred over a row of the current desktop' {
+    $id4352 = New-SfIdentity $SF_INST_4352
+    $id4358 = New-SfIdentity $SF_INST_4358
+
+    It '(p1) the full 12-row SF-STALE with ID-4352 on D3 and the hint (1, EHU, D1) gives position 2 under LiveDesktopFallback (the row (UID4352, D1, 1, EHU); the 0.1.x order gave position 10 under LiveHint)' {
+        $full = Read-Applied (New-SfStaleJson (0..11))
+        $d = Decide-Hinted $full $id4352 $SF_DESK3 (New-FbHint 1 $SF_EHU $SF_DESK1)
+        (Get-Pos $d.Entry) | Should Be 2
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+        (Get-RowId $d.Entry) | Should BeExactly ('{0}|{1}|1|{2}' -f $SF_INST_4352, $SF_DESK1, $SF_EHU)
+    }
+
+    It '(p2) SF-D1 plus the stale row (UID4352, 2, D2U) on D3 as a fifth row, with the same hint, gives position 2 under LiveDesktopFallback (the 0.1.x order gave position 4 under HintUnmatched)' {
+        $doc = Read-Applied (New-AppliedDoc @(
+                (New-AppliedEntryJson $SF_ID $SF_INST_4352 2 $SF_D2U $SF_DESK1),
+                (New-AppliedEntryJson $SF_ID $SF_INST_4358 2 $SF_EHU $SF_DESK1),
+                (New-AppliedEntryJson $SF_ID $SF_INST_4352 1 $SF_EHU $SF_DESK1),
+                (New-AppliedEntryJson $SF_ID $SF_INST_4358 1 $SF_D2U $SF_DESK1),
+                (New-AppliedEntryJson $SF_ID $SF_INST_4352 2 $SF_D2U $SF_DESK3)))
+        $d = Decide-Hinted $doc $id4352 $SF_DESK3 (New-FbHint 1 $SF_EHU $SF_DESK1)
+        (Get-Pos $d.Entry) | Should Be 2
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+    }
+
+    It '(p3) the full 12-row SF-STALE with ID-4358 on D3 and the hint (2, EHU, D1) gives position 1 under LiveDesktopFallback (the 0.1.x order gave position 11 under LiveHint)' {
+        $full = Read-Applied (New-SfStaleJson (0..11))
+        $d = Decide-Hinted $full $id4358 $SF_DESK3 (New-FbHint 2 $SF_EHU $SF_DESK1)
+        (Get-Pos $d.Entry) | Should Be 1
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+    }
+}
+
+Describe 'SPEC-MON-012 AC-009 Field reproduction: the live row of the hint desktop wins over the leftover row of the current desktop' {
+    $ev8 = New-FbEv8Doc
+    $id4352 = New-SfIdentity $SF_INST_4352
+    $id4358 = New-SfIdentity $SF_INST_4358
+
+    It 'the two-line OD log parses to hints that carry the desktop OD' {
+        (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4352).Desktop | Should BeExactly $FB_OD
+        (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4358).Desktop | Should BeExactly $FB_OD
+    }
+
+    It 'on OM ID-4352 gives position 7 and ID-4358 gives position 5, both under LiveDesktopFallback (the leftover rows at positions 6 and 4 are not chosen)' {
+        $d = Decide-Hinted $ev8 $id4352 $SF_DESK1 (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4352)
+        (Get-Pos $d.Entry) | Should Be 7
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+        (Get-RowId $d.Entry) | Should BeExactly ('{0}|{1}|1|{2}' -f $SF_INST_4352, $FB_OD, $SF_EHU)
+        $d = Decide-Hinted $ev8 $id4358 $SF_DESK1 (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4358)
+        (Get-Pos $d.Entry) | Should Be 5
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+        (Get-RowId $d.Entry) | Should BeExactly ('{0}|{1}|2|{2}' -f $SF_INST_4358, $FB_OD, $SF_EHU)
+    }
+
+    It 'on HOME (no rows) ID-4352 gives position 7 and ID-4358 gives position 5, both under LiveDesktopFallback' {
+        $d = Decide-Hinted $ev8 $id4352 $FB_HOME (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4352)
+        (Get-Pos $d.Entry) | Should Be 7
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+        $d = Decide-Hinted $ev8 $id4358 $FB_HOME (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4358)
+        (Get-Pos $d.Entry) | Should Be 5
+        $d.Rule.ToString() | Should BeExactly 'LiveDesktopFallback'
+    }
+
+    It 'on OD (the hint desktop is the current desktop) ID-4352 gives position 7 and ID-4358 gives position 5, both under LiveHint' {
+        $d = Decide-Hinted $ev8 $id4352 $FB_OD (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4352)
+        (Get-Pos $d.Entry) | Should Be 7
+        $d.Rule.ToString() | Should BeExactly 'LiveHint'
+        $d = Decide-Hinted $ev8 $id4358 $FB_OD (Find-Hint $FB_LOG_OD $SF_ID $SF_INST_4358)
+        (Get-Pos $d.Entry) | Should Be 5
+        $d.Rule.ToString() | Should BeExactly 'LiveHint'
+    }
+}

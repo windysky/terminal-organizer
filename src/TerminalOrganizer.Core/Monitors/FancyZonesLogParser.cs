@@ -8,24 +8,33 @@ namespace TerminalOrganizer.Core.Monitors
     /// (SPEC-MON-011 REQ-LOG-001, REQ-HIN-001): the pair of the live applied-layouts row. The
     /// serial comes from the log, never from the EDID (FancyZones cross-wires serials). An empty
     /// serial is a value, not an absence; a null serial is stored as empty. The source file name
-    /// is attached by the reader and is informational only.
+    /// is attached by the reader and is informational only. The desktop is the braced GUID of the
+    /// log line the pair came from (SPEC-MON-012 REQ-DSK-001), as logged; a hint built without a
+    /// desktop carries none (empty).
     /// </summary>
     public sealed class LiveRowHint
     {
         private readonly int number;
         private readonly string serial;
         private readonly string sourceFileName;
+        private readonly string desktop;
 
         public LiveRowHint(int number, string serial)
-            : this(number, serial, null)
+            : this(number, serial, null, null)
         {
         }
 
         public LiveRowHint(int number, string serial, string sourceFileName)
+            : this(number, serial, sourceFileName, null)
+        {
+        }
+
+        public LiveRowHint(int number, string serial, string sourceFileName, string desktop)
         {
             this.number = number;
             this.serial = serial ?? string.Empty;
             this.sourceFileName = sourceFileName ?? string.Empty;
+            this.desktop = desktop ?? string.Empty;
         }
 
         public int Number { get { return number; } }
@@ -34,6 +43,9 @@ namespace TerminalOrganizer.Core.Monitors
 
         /// <summary>The log file the hint came from, or empty when none was attached.</summary>
         public string SourceFileName { get { return sourceFileName; } }
+
+        /// <summary>The desktop GUID of the log line the hint came from, as logged, or empty when none was carried.</summary>
+        public string Desktop { get { return desktop; } }
     }
 
     /// <summary>
@@ -57,7 +69,8 @@ namespace TerminalOrganizer.Core.Monitors
         /// </summary>
         // @MX:NOTE: [AUTO] Line shape observed on 1600 of 1600 lines over 7 days; prefix-anchored on the known id and
         // instance because splitting on '_' is ambiguous (Default_Monitor); the newest line on any desktop wins since
-        // the pair is constant per FancyZones process.
+        // the pair is constant per FancyZones process. The line's own desktop is carried on the hint for the live-desktop
+        // fallback of SPEC-MON-012, never compared here (FindNewestHint keeps three parameters).
         public static LiveRowHint FindNewestHint(string logText, string monitorId, string instance)
         {
             if (string.IsNullOrEmpty(logText) || string.IsNullOrEmpty(monitorId) || instance == null)
@@ -125,7 +138,7 @@ namespace TerminalOrganizer.Core.Monitors
             {
                 return null;
             }
-            return new LiveRowHint(number, text.Substring(separator + 1, guidStart - 1 - (separator + 1)));
+            return new LiveRowHint(number, text.Substring(separator + 1, guidStart - 1 - (separator + 1)), null, text.Substring(guidStart, BracedGuidLength));
         }
     }
 }

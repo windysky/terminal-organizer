@@ -144,16 +144,24 @@ namespace TerminalOrganizer.Core.Monitors
         }
 
         /// <summary>
-        /// The hinted selection with its deciding rule (SPEC-MON-011 REQ-HIN-001..004). When a hint is
-        /// supplied and the current desktop is known, the first instance-exact row (document order) whose
-        /// monitor-number equals the hint number and whose serial-number equals the hint serial ordinally
-        /// is chosen under LiveHint; the identity's own number and serial are not consulted. Otherwise the
-        /// result is exactly the 3-argument Select result (a row or null): DocumentOrder when the hint is
-        /// absent or the desktop is null or empty, HintUnmatched when no instance-exact row carries the
-        /// pair. Pure: the document is not mutated and rejected entries are never considered.
+        /// The hinted selection with its deciding rule (SPEC-MON-011 REQ-HIN-001..004, SPEC-MON-012
+        /// REQ-DSK-002..004). The order is: (1) when the hint is absent or the current desktop is null or
+        /// empty, the 3-argument Select result under DocumentOrder; (2) when the hint carries a desktop that
+        /// differs from the current desktop by GUID value, the first instance-exact row of the HINT's desktop
+        /// (document order) whose monitor-number equals the hint number and whose serial-number equals the hint
+        /// serial ordinally, under LiveDesktopFallback, before any row of the current desktop is consulted;
+        /// (3) the first instance-exact row of the current desktop with the exact hint pair, under LiveHint (the
+        /// identity's own number and serial are not consulted); (4) the 3-argument Select result under
+        /// HintUnmatched, a row or null. Pure: the document is not mutated and rejected entries are never
+        /// considered.
         /// </summary>
-        // @MX:NOTE: [AUTO] The hint chooses only among instance-exact rows; the 3-argument Select above stays the
-        // fallback and is not edited (fan_in rises: resolver, three tools, tests).
+        // @MX:NOTE: [AUTO] The hint chooses among instance-exact rows; the 3-argument Select above stays the last
+        // fallback and is not edited (fan_in rises: resolver, three tools, tests). The step on the hint's own desktop
+        // is the only cross-desktop selection and is tried first, because the desktop named in the newest FancyZones
+        // log line is the desktop FancyZones believes is current.
+        // @MX:REASON: FancyZones v0.102.3101 can stay keyed to one desktop and write the layout the user picks to that
+        // desktop's row, leaving older rows of the desktop the user is on as leftovers (SPEC-MON-012 revision 0.2.0, live
+        // evidence 2026-11-27); the row of the logged desktop is therefore the layout FancyZones shows.
         public static SelectionDecision Decide(AppliedLayoutsDocument document, MonitorIdentity identity, string currentDesktop, LiveRowHint hint)
         {
             if (document == null)
@@ -167,6 +175,21 @@ namespace TerminalOrganizer.Core.Monitors
             if (hint == null || string.IsNullOrEmpty(currentDesktop))
             {
                 return new SelectionDecision(Select(document, identity, currentDesktop), SelectionRule.DocumentOrder);
+            }
+            // The non-empty test is load-bearing: InstanceExact skips its desktop test for an empty desktop, which
+            // would let a hint without a desktop match a row of any desktop.
+            if (!string.IsNullOrEmpty(hint.Desktop)
+                && !DeviceKey.GuidOrOrdinalEquals(hint.Desktop, currentDesktop))
+            {
+                foreach (AppliedLayoutEntry candidate in document.Entries)
+                {
+                    if (InstanceExact(candidate.Device, identity, hint.Desktop)
+                        && candidate.Device.MonitorNumber == hint.Number
+                        && string.Equals(candidate.Device.SerialNumber ?? string.Empty, hint.Serial, StringComparison.Ordinal))
+                    {
+                        return new SelectionDecision(candidate, SelectionRule.LiveDesktopFallback);
+                    }
+                }
             }
             foreach (AppliedLayoutEntry candidate in document.Entries)
             {
@@ -211,11 +234,14 @@ namespace TerminalOrganizer.Core.Monitors
         /// <summary>A hint matched an instance-exact row.</summary>
         LiveHint,
 
-        /// <summary>A hint was supplied, the desktop is known, and no instance-exact row carried the pair; the result is the 3-argument result.</summary>
+        /// <summary>A hint was supplied, the desktop is known, and neither the hint desktop step nor the LiveHint match found a row for the pair; the result is the 3-argument result.</summary>
         HintUnmatched,
 
         /// <summary>No hint was supplied or the desktop is null or empty; the result is the 3-argument result.</summary>
-        DocumentOrder
+        DocumentOrder,
+
+        /// <summary>The instance-exact row of the hint's own desktop carrying the exact pair was chosen ahead of the rows of the current desktop (SPEC-MON-012).</summary>
+        LiveDesktopFallback
     }
 
     /// <summary>The entry a hinted selection chose (null when none) and the one rule that decided it (REQ-HIN-004).</summary>

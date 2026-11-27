@@ -88,7 +88,7 @@ namespace TerminalOrganizer.Core.Monitors
                 if (hint != null)
                 {
                     return new LogReadResult(LogReadCode.Found,
-                        new LiveRowHint(hint.Number, hint.Serial, candidates[i].FileName));
+                        new LiveRowHint(hint.Number, hint.Serial, candidates[i].FileName, hint.Desktop));
                 }
             }
             return new LogReadResult(anyRead ? LogReadCode.NoMatchingLine : LogReadCode.Unreadable, null);

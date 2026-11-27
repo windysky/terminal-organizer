@@ -68,7 +68,8 @@ namespace TerminalOrganizer.App
         /// <summary>Appends the decision line when the change key for this monitor and desktop differs from the last one; never throws.</summary>
         // @MX:NOTE: [AUTO] The change key is (monitor stable key, desktop GUID by value, rule, chosen row number + serial or none);
         // the position, the layout uuid, the hint, the log file name and the reader result code are printed only, so a row reorder
-        // or a changed reason code adds no line. A flip A to B to A logs each change.
+        // or a changed reason code adds no line. A flip A to B to A logs each change. The hint desktop (upper-case braced GUID by
+        // value) is printed for LiveDesktopFallback only and is not part of the change key; the other three line texts are unchanged.
         private void RecordDecision(MonitorInfo monitor, string desktop, LogReadResult read, SelectionDecision decision)
         {
             try
@@ -95,7 +96,9 @@ namespace TerminalOrganizer.App
                     lastDecisionKeys[slot] = changeKey;
                 }
                 string hintText = read.Hint != null
-                    ? "hint " + read.Hint.Number.ToString(CultureInfo.InvariantCulture) + ", " + read.Hint.Serial + ", " + read.Hint.SourceFileName
+                    ? "hint " + read.Hint.Number.ToString(CultureInfo.InvariantCulture) + ", " + read.Hint.Serial
+                        + (decision.Rule == SelectionRule.LiveDesktopFallback ? ", " + NormalizeDesktop(read.Hint.Desktop) : string.Empty)
+                        + ", " + read.Hint.SourceFileName
                     : "no hint: " + read.Code.ToString();
                 string rowText = entry == null
                     ? "row none"

@@ -3810,13 +3810,14 @@ function New-RsLogLine([string]$Instance, [string]$Number, [string]$Serial, [str
     '{0}Initialize layout on {1}_{2}_{3}_{4}_{5}, work area rect = 1920x1032' -f $RS_TS, $RS_ID, $Instance, $Number, $Serial, $Desktop
 }
 
-# The log of the Conventions: (1, EHU) for UID4352 and (2, EHU) for UID4358, on D1 and D2.
+# The log of the Conventions: (1, EHU) for UID4352 and (2, EHU) for UID4358, on D2 and D1. The D2 lines come first, so the NEWEST line
+# of each instance names D1, the current desktop of every resolver call below (SPEC-MON-012 revision 0.2.0, plan.md K.4 option B).
 function Get-RsStandardLog {
     @(
-        (New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK1),
-        (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK1),
         (New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK2),
-        (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK2)
+        (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK2),
+        (New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK1),
+        (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK1)
     ) -join "`r`n"
 }
 
@@ -4426,5 +4427,164 @@ Describe 'SPEC-RULES-011 AC-002 the key degrades to the line text when the rule 
         }
         $caught | Should BeNullOrEmpty
         $script:R11Lines2.Count | Should Be 2
+    }
+}
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-012 M2: resolver result on a desktop that has no applied-layouts row (REQ-DSK-002, REQ-DSK-006; AC-001, first It).
+# SF-D1 = rows 0, 1, 2 and 5 of SF-STALE (all on D1; positions 0 = (UID4352, 2, D2U) stale FiveTerms, 1 = (UID4358, 2, EHU)
+# live FourTerms, 2 = (UID4352, 1, EHU) live FourTerms, 3 = (UID4358, 1, D2U) stale FiveTerms). The log holds exactly two lines,
+# both on D1: UID4352 with (1, EHU) and UID4358 with (2, EHU). The current desktop of the calls is D3, which has no row.
+# ---------------------------------------------------------------------------
+function New-FbRsDir {
+    $dir = New-RsDir $false
+    Set-RsApplied $dir (New-RsAppliedJson @(0, 1, 2, 5) $false)
+    Set-RsLog $dir (((New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK1), (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK1)) -join "`r`n")
+    $dir
+}
+
+Describe 'SPEC-MON-012 AC-001 Resolver result on a desktop without a row' {
+    It 'ID-4352 and ID-4358 on D3 resolve to the live FourTerms layout (4 zones) through the log desktop D1, not the stale FiveTerms row' {
+        $dir = New-FbRsDir
+        try {
+            $resolver = New-RsResolver $dir
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4'
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4358 2 $RS_EHU), $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4'
+        }
+        finally { Remove-RsDir $dir }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-012 M3: the decision line of the fallback (REQ-DSK-005; AC-001 second It, AC-002).
+# The expected line texts are pinned by hand from spec.md section 3.2 (never built from the code under test).
+# New-FbRsDir (above) builds SF-D1 plus the two-line D1 log; the current desktop of these calls is D3 or D2, neither of
+# which has a row.
+# ---------------------------------------------------------------------------
+Describe 'SPEC-MON-012 AC-001 Decision lines of the fallback' {
+    It 'ID-4352 and ID-4358 on D3 each add exactly one line, naming LiveDesktopFallback and the hint desktop' {
+        $dir = New-FbRsDir
+        try {
+            $resolver = New-RsResolver $dir
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4'
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0] | Should BeExactly 'applied row: monitor 1 desktop {F00CF935-4664-4091-8DB7-96651F0C4D1E} by LiveDesktopFallback (hint 1, XPG0H42JBEHU, {9089F388-5216-49EA-9CD4-07E910D817EB}, log_2026-10-23.log) position 2 number 1 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000004}'
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4358 2 $RS_EHU), $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4'
+            $script:RsLines.Count | Should Be 2
+            $script:RsLines[1] | Should BeExactly 'applied row: monitor 2 desktop {F00CF935-4664-4091-8DB7-96651F0C4D1E} by LiveDesktopFallback (hint 2, XPG0H42JBEHU, {9089F388-5216-49EA-9CD4-07E910D817EB}, log_2026-10-23.log) position 1 number 2 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000004}'
+        }
+        finally { Remove-RsDir $dir }
+    }
+
+    It 'a hint desktop logged in lowercase is printed as the upper-case braced GUID' {
+        $dir = New-FbRsDir
+        try {
+            Set-RsLog $dir (((New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK1.ToLower()), (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK1.ToLower())) -join "`r`n")
+            $resolver = New-RsResolver $dir
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4'
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0] | Should BeExactly 'applied row: monitor 1 desktop {F00CF935-4664-4091-8DB7-96651F0C4D1E} by LiveDesktopFallback (hint 1, XPG0H42JBEHU, {9089F388-5216-49EA-9CD4-07E910D817EB}, log_2026-10-23.log) position 2 number 1 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000004}'
+        }
+        finally { Remove-RsDir $dir }
+    }
+}
+
+Describe 'SPEC-MON-012 AC-002 Decision-line deduplication and flips' {
+    It 'the six steps (a) to (f) leave 1, 2, 3, 4, 4 and 5 lines in total, with the pinned texts' {
+        $dir = New-FbRsDir
+        try {
+            $mon = New-RsMonitor $RS_INST_4352 1 $RS_D2U
+            $resolver = New-RsResolver $dir
+            $first = 'applied row: monitor 1 desktop {F00CF935-4664-4091-8DB7-96651F0C4D1E} by LiveDesktopFallback (hint 1, XPG0H42JBEHU, {9089F388-5216-49EA-9CD4-07E910D817EB}, log_2026-10-23.log) position 2 number 1 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000004}'
+
+            # (a) ten calls on D3: one line, the AC-001 text
+            for ($i = 1; $i -le 10; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0] | Should BeExactly $first
+
+            # (b) three calls on D2: a new monitor-and-desktop slot, one more line naming D2
+            for ($i = 1; $i -le 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK2)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 2
+            $script:RsLines[1] | Should BeExactly 'applied row: monitor 1 desktop {44CD2EF4-27B1-40A7-8549-DD8033C09F8F} by LiveDesktopFallback (hint 1, XPG0H42JBEHU, {9089F388-5216-49EA-9CD4-07E910D817EB}, log_2026-10-23.log) position 2 number 1 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000004}'
+
+            # (c) the whole Logs folder is deleted: no hint, DocumentOrder with a null row; three calls add one line
+            Remove-Item -LiteralPath (Join-Path $dir 'Logs') -Recurse -Force
+            for ($i = 1; $i -le 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK3)) | Should BeExactly 'Unsupported||0' }
+            $script:RsLines.Count | Should Be 3
+            $script:RsLines[2] | Should BeExactly 'applied row: monitor 1 desktop {F00CF935-4664-4091-8DB7-96651F0C4D1E} by DocumentOrder (no hint: NoLogsFolder) row none'
+
+            # (d) the D1 log is recreated: FourTerms again, one more line identical in text to the first (a flip A to B to A logs each change)
+            Set-RsLog $dir (((New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK1), (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK1)) -join "`r`n")
+            for ($i = 1; $i -le 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 4
+            $script:RsLines[3] | Should BeExactly $first
+
+            # (e) the file is rewritten as SF-D1 plus the stale row (UID4352, 2, D2U) on D3 (original row 9, FiveTerms; file order 0, 1, 2, 5, 9):
+            # the live row of the hint desktop D1 still wins, the stale row of the current desktop is not used, and the change key (rule, row number,
+            # serial) is unchanged, so no line is added (revision 0.2.0; the 0.1.x step (e) pinned a current-desktop row winning under LiveHint)
+            Set-RsApplied $dir (New-RsAppliedJson @(0, 1, 2, 5, 9) $false)
+            for ($i = 1; $i -le 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK3)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 4
+
+            # (f) three calls on D1 (the current desktop equals the hint desktop; a new monitor-and-desktop slot): FourTerms, one more line under LiveHint,
+            # with no hint desktop on the line (the preference is inert when the hint desktop is the current desktop)
+            for ($i = 1; $i -le 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 5
+            $script:RsLines[4] | Should BeExactly 'applied row: monitor 1 desktop {9089F388-5216-49EA-9CD4-07E910D817EB} by LiveHint (hint 1, XPG0H42JBEHU, log_2026-10-23.log) position 2 number 1 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000004}'
+        }
+        finally { Remove-RsDir $dir }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-012 revision 0.2.0 M4: field reproduction at resolver level (AC-009, second part; REQ-DSK-002, REQ-DSK-005, REQ-DSK-006).
+# EV-8 = the eight rows of the live evidence file in document order, all monitor DEL4091: 0 (UID4352, 2, D2U, OM); 1 (UID4352, 2, D2U, OD);
+# 2 (UID4358, 1, D2U, OM); 3 (UID4358, 1, D2U, OD); 4 (UID4358, 2, EHU, OM); 5 (UID4358, 2, EHU, OD); 6 (UID4352, 1, EHU, OM) the leftover;
+# 7 (UID4352, 1, EHU, OD) the live row. OM = RS_DESK1 (the current desktop of the calls), OD = the desktop FancyZones is keyed to. The OM rows
+# apply FourTerms (4 zones), the OD rows apply SixTerms (6 zones, a layout added to the custom-layouts text of this fixture only). The log holds
+# two lines on OD: UID4352 with (1, EHU) and UID4358 with (2, EHU). Expected texts are pinned by hand from spec.md section 3.2.
+# ---------------------------------------------------------------------------
+$FB_EV_OD = '{EBFCC0E3-1642-4EB1-A93F-8B64EDFB20C1}'
+$FB_EV_SIX = '{A1000000-0000-4000-8000-000000000006}'
+
+function New-FbEvRowJson([string]$Instance, [int]$Number, [string]$Serial, [string]$Desktop, [string]$Uuid, [int]$Zones) {
+    '{"device":{"monitor":"' + $RS_ID + '","monitor-instance":"' + $Instance + '","monitor-number":' + $Number +
+        ',"serial-number":"' + $Serial + '","virtual-desktop":"' + $Desktop +
+        '"},"applied-layout":{"uuid":"' + $Uuid + '","type":"custom","show-spacing":false,"spacing":0,"zone-count":' + $Zones + ',"sensitivity-radius":20}}'
+}
+
+# A FancyZones-shaped directory holding EV-8, the custom layouts of New-RsDir plus SixTerms, and the two-line OD log.
+function New-FbEvDir {
+    $dir = New-RsDir $false
+    $rows = @(
+        (New-FbEvRowJson $RS_INST_4352 2 $RS_D2U $RS_DESK1 $RS_FOUR 4),
+        (New-FbEvRowJson $RS_INST_4352 2 $RS_D2U $FB_EV_OD $FB_EV_SIX 6),
+        (New-FbEvRowJson $RS_INST_4358 1 $RS_D2U $RS_DESK1 $RS_FOUR 4),
+        (New-FbEvRowJson $RS_INST_4358 1 $RS_D2U $FB_EV_OD $FB_EV_SIX 6),
+        (New-FbEvRowJson $RS_INST_4358 2 $RS_EHU $RS_DESK1 $RS_FOUR 4),
+        (New-FbEvRowJson $RS_INST_4358 2 $RS_EHU $FB_EV_OD $FB_EV_SIX 6),
+        (New-FbEvRowJson $RS_INST_4352 1 $RS_EHU $RS_DESK1 $RS_FOUR 4),
+        (New-FbEvRowJson $RS_INST_4352 1 $RS_EHU $FB_EV_OD $FB_EV_SIX 6)
+    )
+    Set-RsApplied $dir ('{"applied-layouts":[' + ($rows -join ',') + ']}')
+    $six = '{"uuid":"' + $FB_EV_SIX + '","name":"SixTerms","type":"grid","info":{"rows":2,"columns":3,"rows-percentage":[5000,5000],"columns-percentage":[3333,3333,3334],"cell-child-map":[[0,1,2],[3,4,5]],"show-spacing":false,"spacing":0,"sensitivity-radius":20}}'
+    [IO.File]::WriteAllText((Join-Path $dir 'custom-layouts.json'), $RS_CUSTOM.Substring(0, $RS_CUSTOM.Length - 2) + ',' + $six + ']}')
+    Set-RsLog $dir (((New-RsLogLine $RS_INST_4352 '1' $RS_EHU $FB_EV_OD), (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $FB_EV_OD)) -join "`r`n")
+    $dir
+}
+
+Describe 'SPEC-MON-012 AC-009 Resolver field reproduction: the live row of the desktop FancyZones is keyed to wins on Office-Main' {
+    It 'monitor 1 and monitor 2 on OM resolve SixTerms (6 zones) through the hint desktop OD, not the leftover 4-zone OM rows, with the pinned decision lines' {
+        $dir = New-FbEvDir
+        try {
+            $resolver = New-RsResolver $dir
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK1)) | Should BeExactly 'Supported|SixTerms|6'
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0] | Should BeExactly 'applied row: monitor 1 desktop {9089F388-5216-49EA-9CD4-07E910D817EB} by LiveDesktopFallback (hint 1, XPG0H42JBEHU, {EBFCC0E3-1642-4EB1-A93F-8B64EDFB20C1}, log_2026-10-23.log) position 7 number 1 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000006}'
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4358 2 $RS_EHU), $RS_DESK1)) | Should BeExactly 'Supported|SixTerms|6'
+            $script:RsLines.Count | Should Be 2
+            $script:RsLines[1] | Should BeExactly 'applied row: monitor 2 desktop {9089F388-5216-49EA-9CD4-07E910D817EB} by LiveDesktopFallback (hint 2, XPG0H42JBEHU, {EBFCC0E3-1642-4EB1-A93F-8B64EDFB20C1}, log_2026-10-23.log) position 5 number 2 serial XPG0H42JBEHU layout {A1000000-0000-4000-8000-000000000006}'
+        }
+        finally { Remove-RsDir $dir }
     }
 }
